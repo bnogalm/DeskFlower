@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DeskFlower
+Comment=Share keyboard, mouse and clipboard with your other computers
+Exec=/opt/deskflower/bin/deskflower-agent
+Icon=deskflower
+Terminal=false
+Categories=Utility;Network;

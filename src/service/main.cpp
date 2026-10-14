@@ -1,0 +1,254 @@
+#include "buildinfo.h"
+#include "logging.h"
+#include "node.h"
+#include "platform/platform.h"
+#include "clipboardsync.h"
+#include "filetransfer.h"
+#include "phoneserver.h"
+#include "remoteview.h"
+#include "settings.h"
+#include "inputcontroller.h"
+#include "servicecontroller.h"
+#include "sessionlauncher.h"
+#include "updater.h"
+#include "workspace.h"
+
+#include <QCommandLineParser>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+
+namespace {
+
+void setApplicationInfo()
+{
+    QCoreApplication::setOrganizationName(QStringLiteral("Deskflower"));
+    QCoreApplication::setApplicationName(QStringLiteral("deskflower"));
+    QCoreApplication::setApplicationVersion(df::build::version());
+}
+
+// Verified update packages go to the OS installer (Windows: msiexec, as LocalSystem).
+class PlatformInstaller : public df::PackageInstaller
+{
+public:
+    PlatformInstaller(bool serviceMode, QString logPath) : m_serviceMode(serviceMode), m_logPath(std::move(logPath)) {}
+    bool isSupported() const override { return df::platform::canInstallPackages(m_serviceMode); }
+    bool launch(const QString &packagePath, std::function<void(bool, const QString &)> onExit,
+                QString *error) override
+    {
+        return df::platform::launchPackageInstaller(packagePath, m_logPath, std::move(onExit), error);
+    }
+
+private:
+    bool m_serviceMode;
+    QString m_logPath;
+};
+
+int runNode(int argc, char **argv, bool serviceMode)
+{
+    QCoreApplication app(argc, argv);
+    setApplicationInfo();
+    df::platform::SessionEvents::instance(); // created on the Qt thread
+
+    QCommandLineParser parser;
+    parser.setApplicationDescription(QStringLiteral("DeskFlower service"));
+    parser.addHelpOption();
+    parser.addVersionOption();
+    QCommandLineOption instanceOpt(QStringLiteral("instance"),
+                                   QStringLiteral("Instance name (to run several on one machine)."),
+                                   QStringLiteral("name"));
+    QCommandLineOption configOpt(QStringLiteral("config-dir"), QStringLiteral("Configuration directory."),
+                                 QStringLiteral("dir"));
+    QCommandLineOption portOpt(QStringLiteral("port"), QStringLiteral("UDP data port."), QStringLiteral("port"),
+                               QString::number(df::wire::kDefaultDataPort));
+    QCommandLineOption noDiscoveryOpt(QStringLiteral("no-discovery"), QStringLiteral("Disable LAN discovery."));
+    QCommandLineOption serviceOpt(QStringLiteral("service"),
+                                  QStringLiteral("Run under the Windows Service Control Manager."));
+    QCommandLineOption installOpt(QStringLiteral("install"),
+                                  QStringLiteral("Register and start the service (Windows: as administrator)."));
+    QCommandLineOption uninstallOpt(QStringLiteral("uninstall"), QStringLiteral("Stop and unregister the service."));
+    QCommandLineOption noSessionOpt(QStringLiteral("no-session"),
+                                    QStringLiteral("Do not start the session helper (no screens, no input)."));
+    parser.addOptions(
+        {instanceOpt, configOpt, portOpt, noDiscoveryOpt, serviceOpt, installOpt, uninstallOpt, noSessionOpt});
+    parser.process(app);
+
+    const QString instance = parser.value(instanceOpt);
+    QString configDir = parser.value(configOpt);
+    if (configDir.isEmpty()) {
+        configDir = df::platform::defaultConfigDir(serviceMode);
+        if (!instance.isEmpty())
+            configDir = QDir(configDir).filePath(instance);
+    }
+    QDir().mkpath(configDir);
+    // As LocalSystem, a directory that others can change is not used at all (it holds the identity,
+    // and the updater deletes and installs from it).
+    if (!df::platform::secureDirectory(configDir, serviceMode) && serviceMode) {
+        qCritical().noquote() << "Cannot secure" << configDir;
+        return 1;
+    }
+    df::installFileLogging(QDir(configDir).filePath(QStringLiteral("logs")), QStringLiteral("service.log"), !serviceMode);
+    df::platform::installQuitHandlers();
+
+    df::Node::Options options;
+    options.configDir = configDir;
+    options.dataPort = quint16(parser.value(portOpt).toUInt());
+    options.enableDiscovery = !parser.isSet(noDiscoveryOpt);
+
+    df::Node node(options);
+    QString error;
+    if (!node.start(&error)) {
+        qCritical().noquote() << error;
+        return 1;
+    }
+    df::Workspace workspace(&node, configDir);
+    df::InputController input(&node, &workspace);
+    df::Settings settings(configDir);
+    df::FileTransfer transfer(&node);
+    // Shared folder: chosen in the agent, or <user home>/Deskflower (looked up each time: users log
+    // on and off). Phone uploads and files received through the clipboard go there.
+    auto sharedFolder = [&settings, serviceMode, configDir] {
+        QString folder = settings.value(QStringLiteral("sharedFolder")).toString();
+        if (folder.isEmpty()) {
+            const QString home = df::platform::interactiveUserHome(serviceMode);
+            folder = home.isEmpty() ? QDir(configDir).filePath(QStringLiteral("Shared"))
+                                    : QDir(home).filePath(QStringLiteral("Deskflower"));
+        }
+        QDir().mkpath(folder);
+        return folder;
+    };
+    df::ClipboardSync clipboard(&node, &transfer, &settings, sharedFolder);
+    df::web::PhoneServer::Options phoneOptions;
+    phoneOptions.configDir = configDir;
+    phoneOptions.port = quint16(settings.value(QStringLiteral("phonePort"), df::web::PhoneServer::kDefaultPort).toInt());
+    phoneOptions.folder = sharedFolder;
+    phoneOptions.deviceName = node.name();
+    df::web::PhoneServer phone(phoneOptions);
+    df::RemoteView remoteView(&node, &workspace);
+    PlatformInstaller installer(serviceMode, QDir(configDir).filePath(QStringLiteral("logs/update-install.log")));
+    df::Updater updater(&node, &installer,
+                        df::Updater::Options::defaults(QDir(configDir).filePath(QStringLiteral("updates"))));
+    if (serviceMode) {
+        // Agents quit while an update is installed (ServiceController). The next service starts the
+        // agent again, or this one if the installer fails.
+        const QString agentMarker = QDir(configDir).filePath(QStringLiteral("updates/restart-agent"));
+        QObject::connect(&updater, &df::Updater::aboutToInstall, &updater, [agentMarker] {
+            QFile marker(agentMarker);
+            if (!marker.open(QIODevice::WriteOnly))
+                qWarning().noquote() << "Cannot write" << agentMarker;
+        });
+        QObject::connect(&updater, &df::Updater::finished, &updater, [agentMarker](const QByteArray &, bool ok) {
+            if (!ok && QFile::remove(agentMarker))
+                df::platform::relaunchAgent();
+        });
+        if (QFile::remove(agentMarker))
+            df::platform::relaunchAgent();
+    }
+    std::unique_ptr<df::SessionLauncher> launcher;
+    if (!parser.isSet(noSessionOpt))
+        launcher = std::make_unique<df::SessionLauncher>(
+            instance, QDir(configDir).filePath(QStringLiteral("logs")), serviceMode);
+    // With --no-session the helper can be started by hand (e.g. under a debugger) using a token
+    // agreed through DESKFLOWER_SESSION_TOKEN.
+    const QByteArray sessionToken = launcher ? launcher->token() : qgetenv("DESKFLOWER_SESSION_TOKEN");
+    df::ServiceController controller(&node, &workspace, &input, &clipboard, &transfer, &settings, &phone, &remoteView,
+                                     &updater, sharedFolder, instance, serviceMode, sessionToken);
+    if (!controller.listen(&error)) {
+        qCritical().noquote() << error;
+        return 1;
+    }
+    if (serviceMode) {
+        // The Run entry follows the user's choice (also after an upgrade, which removes the old one).
+        const bool autostart = settings.value(QStringLiteral("agentAutostart"), true).toBool();
+        if (df::platform::agentAutostartSupported(serviceMode))
+            df::platform::setAgentAutostart(autostart);
+        // First start of a new version: an installer (or an update from a paired device) closed the
+        // agent to replace its files, so start it again for the signed-in user.
+        const QString version = QCoreApplication::applicationVersion();
+        if (settings.value(QStringLiteral("lastVersion")).toString() != version) {
+            settings.setValue(QStringLiteral("lastVersion"), version);
+            df::platform::relaunchAgent();
+        }
+    }
+    // Discovery mode is on at launch so new devices can find and pair with us.
+    node.setExploring(true);
+    if (launcher)
+        launcher->start();
+
+    qInfo().noquote() << "DeskFlower service" << QCoreApplication::applicationVersion()
+                      << (serviceMode ? "(service mode)" : "(console mode)") << "config:" << configDir;
+    df::platform::notifyStarted();
+    const int rc = app.exec();
+    qInfo() << "DeskFlower service stopped";
+    return rc;
+}
+
+bool hasArg(int argc, char **argv, const char *name)
+{
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], name) == 0)
+            return true;
+    }
+    return false;
+}
+
+// Run by the MSI (as LocalSystem) with the package being installed: when a signed manifest sits next
+// to it, the package is kept so that this device can serve it to paired devices.
+int importUpdate(int argc, char **argv)
+{
+    QCoreApplication app(argc, argv);
+    setApplicationInfo();
+    QCommandLineParser parser;
+    QCommandLineOption importOpt(QStringLiteral("import-update"), QStringLiteral("Package to keep for paired devices."),
+                                 QStringLiteral("package"));
+    QCommandLineOption configOpt(QStringLiteral("config-dir"), QStringLiteral("Configuration directory."),
+                                 QStringLiteral("dir"));
+    parser.addOptions({importOpt, configOpt});
+    parser.process(app);
+
+    QString configDir = parser.value(configOpt);
+    if (configDir.isEmpty())
+        configDir = df::platform::defaultConfigDir(true);
+    QDir().mkpath(configDir);
+    if (!df::platform::secureDirectory(configDir, true)) {
+        std::fprintf(stderr, "Update package not kept: cannot secure %s\n", qPrintable(configDir));
+        return 1;
+    }
+    QString error;
+    const auto options = df::Updater::Options::defaults(QDir(configDir).filePath(QStringLiteral("updates")));
+    if (!df::Updater::importPackage(options, parser.value(importOpt), &error)) {
+        std::fprintf(stderr, "Update package not kept: %s\n", qPrintable(error));
+        return 1;
+    }
+    std::fprintf(stdout, "Update package kept for paired devices.\n");
+    return 0;
+}
+
+int manageService(int argc, char **argv, bool install)
+{
+    QCoreApplication app(argc, argv);
+    setApplicationInfo();
+    QString message;
+    const int rc = install ? df::platform::install(&message) : df::platform::uninstall(&message);
+    std::fprintf(rc == 0 ? stdout : stderr, "%s\n", qPrintable(message));
+    return rc;
+}
+
+} // namespace
+
+int main(int argc, char *argv[])
+{
+    // Decided before QCoreApplication exists: the Windows SCM expects the dispatcher right away.
+    if (hasArg(argc, argv, "--install"))
+        return manageService(argc, argv, true);
+    if (hasArg(argc, argv, "--uninstall"))
+        return manageService(argc, argv, false);
+    if (hasArg(argc, argv, "--import-update"))
+        return importUpdate(argc, argv);
+    if (hasArg(argc, argv, "--service"))
+        return df::platform::runService(argc, argv, [](int c, char **v) { return runNode(c, v, true); });
+    return runNode(argc, argv, false);
+}

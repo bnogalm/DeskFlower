@@ -1,0 +1,89 @@
+# Builds DeskFlower on Linux and macOS, runs the tests and packages it (DEB and DMG, kept as
+# artifacts of the run). Windows is built locally with scripts\build-windows.bat and
+# scripts\package-windows.bat (the MSI is signed with the update key, which stays off GitHub).
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  QT_VERSION: '6.11.2'   # the same Qt as the Windows builds
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build pkg-config libsodium-dev libssl-dev \
+            libx11-dev libxi-dev libxtst-dev libxrandr-dev libei-dev liboeffis-dev \
+            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype-dev \
+            libxcb-cursor0 dpkg-dev file
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package (DEB)
+        run: cd build && cpack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskflower-linux-x64
+          path: build/*.deb
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14   # Apple silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: brew install ninja pkg-config libsodium openssl@3
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          cache: true
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package (DMG)
+        run: cd build && cpack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskflower-macos-arm64
+          path: build/*.dmg
+          if-no-files-found: error

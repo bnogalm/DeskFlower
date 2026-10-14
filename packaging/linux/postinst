@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+# Enable the user service for every user (it starts with their graphical session).
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --global enable deskflower.service || true
+fi
+exit 0

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>DeskFlower</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>DeskFlower</h1>
+      <p id="device" class="muted"></p>
+    </div>
+    <button id="logout" class="ghost" type="button">Disconnect</button>
+  </header>
+
+  <main>
+    <section class="actions">
+      <label class="button primary">
+        <input id="pick-files" type="file" multiple hidden>
+        Upload files
+      </label>
+      <label class="button">
+        <input id="take-photo" type="file" accept="image/*,video/*" capture="environment" hidden>
+        Take a photo
+      </label>
+    </section>
+
+    <ul id="uploads" class="uploads"></ul>
+
+    <section class="card">
+      <h2>Send text to the computer</h2>
+      <form id="text-form">
+        <textarea id="text" rows="3" placeholder="It will be on the computer's clipboard"></textarea>
+        <button class="primary" type="submit">Send</button>
+      </form>
+    </section>
+
+    <section>
+      <nav id="crumbs" class="crumbs" aria-label="Folder"></nav>
+      <p id="empty" class="muted" hidden>This folder is empty.</p>
+      <ul id="files" class="files"></ul>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

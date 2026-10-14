@@ -1,0 +1,10 @@
+build/
+.vs/
+.vscode/
+*.user
+CMakeUserPresets.json
+dist/
+# Update signing key pair: secret, back it up, never commit (scripts/package-windows.bat)
+release-signing-key/
+# Not part of the project
+linkedin-post.txt

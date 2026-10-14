@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DeskFlower
+Comment=DeskFlower tray icon
+Exec=/opt/deskflower/bin/deskflower-agent --minimized
+Icon=deskflower
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

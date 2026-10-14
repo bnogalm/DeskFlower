@@ -1,0 +1,13 @@
+add_library(qrcodegen STATIC qrcodegen.hpp qrcodegen.cpp)
+target_include_directories(qrcodegen SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+# Third-party code: keep our warning level out of it.
+get_target_property(_options qrcodegen COMPILE_OPTIONS)
+if(_options)
+    list(REMOVE_ITEM _options /W4 -Wall -Wextra)
+    set_target_properties(qrcodegen PROPERTIES COMPILE_OPTIONS "${_options}")
+endif()
+if(MSVC)
+    target_compile_options(qrcodegen PRIVATE /W0)
+else()
+    target_compile_options(qrcodegen PRIVATE -w)
+endif()

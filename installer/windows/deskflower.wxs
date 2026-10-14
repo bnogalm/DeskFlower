@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Deskflower MSI (WiX 3). Built by scripts\package-windows.bat:
+    - the application files are harvested from dist\Deskflower by heat.exe (component group AppFiles);
+    - the service registers itself (service, failure actions, firewall rules, start) through
+      "deskflower-service.exe -install", run silently as a deferred custom action; uninstalling runs
+      "-uninstall" before the files are removed;
+    - the agent has a Start menu shortcut; the service writes its autostart entry (minimized to the
+      system tray at every logon, a choice the user can change in the agent) and starts it after an
+      installation or upgrade;
+    - when the MSI has a signed manifest next to it (Deskflower-<version>-x64.msi.manifest and
+      .manifest.sig), "deskflower-service.exe -import-update" keeps a copy in
+      %ProgramData%\Deskflower\updates so that this device can update its paired devices. Updates
+      received from a paired device are installed the same way, so they are kept too.
+  The configuration in %ProgramData%\Deskflower (identity, paired devices) is kept on uninstall.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product Id="*" Name="DeskFlower" Language="1033" Version="$(var.Version)" Manufacturer="DeskFlower"
+           UpgradeCode="48A854F1-20F7-4197-A31E-19D26CCD8ACE">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64"
+             Description="DeskFlower $(var.Version)" Comments="Shared keyboard, mouse and clipboard" />
+
+    <!-- The old version is removed before the installation transaction starts: Windows Installer rejects
+         (error 2613) a RemoveExistingProducts inside the transaction that follows script actions such
+         as the service rollback below. -->
+    <!-- AllowSameVersionUpgrades: a rebuild with the same version replaces the installed one
+         instead of being installed next to it (ICE61 warns about it; intended). -->
+    <MajorUpgrade Schedule="afterInstallValidate" AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of DeskFlower is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- resources/icons/deskflower.ico, passed by scripts\package-windows.bat. -->
+    <Icon Id="deskflower.ico" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="deskflower.ico" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Deskflower" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder" />
+    </Directory>
+
+    <DirectoryRef Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="5CCA0B67-AD7E-4D08-A3A9-D08D40FC257E" Win64="yes">
+        <Shortcut Id="AgentShortcut" Name="DeskFlower" Description="Share keyboard, mouse and clipboard"
+                  Target="[INSTALLFOLDER]bin\deskflower-agent.exe" WorkingDirectory="INSTALLFOLDER"
+                  Icon="deskflower.ico" />
+        <RegistryValue Root="HKLM" Key="Software\Deskflower" Name="StartMenuShortcut" Type="integer" Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- The installer stops the service itself (which ends the session helper) before replacing files.
+         Declared here, its files are not counted as in use: Windows Installer never closes services
+         through the Restart Manager and otherwise asks for a reboot that is not needed. (Disabling
+         the Restart Manager is no way out: the older check matches DLLs by name only, so any
+         application with its own vcruntime140.dll is listed as holding our files.) Registering,
+         starting and removing the service stays with deskflower-service (custom actions below). -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="ServiceStop" Guid="6F0E2C55-3D3B-4C0A-9F55-8B8E1D2B7A41" Win64="yes">
+        <RegistryValue Root="HKLM" Key="Software\Deskflower" Name="ServiceControl" Type="integer" Value="1"
+                       KeyPath="yes" />
+        <ServiceControl Id="StopDeskflowerService" Name="Deskflower" Stop="both" Wait="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Main" Title="DeskFlower" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="ServiceStop" />
+    </Feature>
+
+    <!-- The agent hides to the tray on WM_CLOSE: end it so its files can be replaced or removed. An
+         update installed by the service (session 0, where this finds no window) asks the agents to
+         quit beforehand and starts the new one afterwards. -->
+    <util:CloseApplication Id="CloseAgent" Target="deskflower-agent.exe" TerminateProcess="0"
+                           RebootPrompt="no" />
+
+    <!-- Service registration, done by the service itself. -->
+    <SetProperty Id="InstallService" Before="InstallService" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]bin\deskflower-service.exe&quot; --install" />
+    <CustomAction Id="InstallService" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="deferred"
+                  Impersonate="no" Return="check" />
+    <SetProperty Id="UninstallService" Before="UninstallService" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]bin\deskflower-service.exe&quot; --uninstall" />
+    <CustomAction Id="UninstallService" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="deferred"
+                  Impersonate="no" Return="ignore" />
+
+    <!-- Rollback: an uninstallation that fails after the service was removed restores the files,
+         then registers the service again. -->
+    <SetProperty Id="RestoreService" Before="RestoreService" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]bin\deskflower-service.exe&quot; --install" />
+    <CustomAction Id="RestoreService" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="rollback"
+                  Impersonate="no" Return="ignore" />
+
+    <!-- Keeps the signed package for paired devices; never fails the installation (e.g. no manifest). -->
+    <SetProperty Id="ImportUpdate" Before="ImportUpdate" Sequence="execute"
+                 Value="&quot;[INSTALLFOLDER]bin\deskflower-service.exe&quot; --import-update &quot;[OriginalDatabase]&quot;" />
+    <CustomAction Id="ImportUpdate" BinaryKey="WixCA" DllEntry="WixQuietExec64" Execute="deferred"
+                  Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="RestoreService" Before="UninstallService">REMOVE~="ALL"</Custom>
+      <Custom Action="UninstallService" Before="RemoveFiles">REMOVE~="ALL"</Custom>
+      <Custom Action="ImportUpdate" After="InstallFiles">NOT REMOVE~="ALL"</Custom>
+      <Custom Action="InstallService" Before="InstallFinalize">NOT REMOVE~="ALL"</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

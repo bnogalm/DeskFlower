@@ -1,0 +1,313 @@
+<!doctype html>
+<!-- GitHub Pages entry (Settings > Pages > Deploy from a branch: main, /docs).
+     The download and source links point at REPO below: set it to the published repository. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeskFlower: one keyboard and mouse for all your computers</title>
+  <meta name="description" content="Share keyboard, mouse, clipboard and files between computers on your local network. Drag files from one computer to another, see their screens, send files from your phone.">
+  <link rel="icon" href="img/icon.svg" type="image/svg+xml">
+  <style>
+    :root {
+      --bg: #16181c; --panel: #1f2227; --line: #2c3036; --text: #e8eaed; --muted: #9aa0a6;
+      --accent: #4db6ac; --accent-dark: #00796b; --petal: #f48fb1;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.6;
+           font: 17px/1.6 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
+    a { color: var(--accent); }
+    img { max-width: 100%; height: auto; display: block; }
+    .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+
+    /* Header */
+    header { position: sticky; top: 0; z-index: 10; background: rgba(22, 24, 28, .85);
+             backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+    header .wrap { display: flex; align-items: center; gap: 12px; height: 60px; }
+    header .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 19px;
+                    color: var(--text); text-decoration: none; }
+    header nav { margin-left: auto; display: flex; gap: 22px; }
+    header nav a { color: var(--muted); text-decoration: none; font-size: 15px; }
+    header nav a:hover { color: var(--text); }
+    @media (max-width: 700px) { header nav a:not(.btn) { display: none; } }
+
+    .btn { display: inline-block; padding: 12px 26px; border-radius: 999px; background: var(--accent);
+           color: #062b27; font-weight: 600; text-decoration: none; transition: transform .15s; }
+    .btn:hover { transform: translateY(-2px); }
+    .btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+    header .btn { padding: 7px 18px; font-size: 15px; }
+
+    /* Hero */
+    .hero { text-align: center; padding: 90px 0 40px; }
+    .hero img.logo { width: 92px; margin: 0 auto 18px; animation: sway 5s ease-in-out infinite; transform-origin: bottom; }
+    .hero h1 { font-size: clamp(34px, 6vw, 58px); line-height: 1.1; margin: 0 0 18px; }
+    .hero h1 span { color: var(--accent); }
+    .hero p { color: var(--muted); font-size: 20px; max-width: 720px; margin: 0 auto 32px; }
+    .hero .actions { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+    .hero .note { font-size: 14px; margin-top: 16px; }
+    .hero .shot { margin: 60px auto 0; max-width: 900px; }
+    @keyframes sway { 50% { transform: rotate(4deg); } }
+
+    .shot { border-radius: 12px; overflow: hidden; border: 1px solid var(--line);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, .45); }
+
+    /* Features, revealed while scrolling */
+    .feature { display: grid; grid-template-columns: 1fr 1.25fr; gap: 64px; align-items: center; padding: 90px 0; }
+    .feature:nth-of-type(even) .text { order: 2; }
+    .feature h2 { font-size: clamp(26px, 3.4vw, 36px); line-height: 1.2; margin: 0 0 16px; }
+    .feature p { color: var(--muted); margin: 0 0 12px; }
+    .feature .tag { color: var(--accent); font-weight: 600; font-size: 14px; letter-spacing: .08em; text-transform: uppercase; }
+    @media (max-width: 860px) {
+      .feature { grid-template-columns: 1fr; gap: 32px; padding: 60px 0; }
+      .feature:nth-of-type(even) .text { order: 0; }
+    }
+    .reveal { opacity: 0; transform: translateY(40px); transition: opacity .8s ease, transform .8s ease; }
+    .reveal.visible { opacity: 1; transform: none; }
+    .reveal .media { transition: transform 1s ease .15s; transform: scale(.96); }
+    .reveal.visible .media { transform: none; }
+    @media (prefers-reduced-motion: reduce) {
+      .reveal, .reveal .media { opacity: 1; transform: none; transition: none; }
+      *, *::before, *::after { animation: none !important; }
+    }
+
+    .phone { width: 300px; margin: 0 auto; border: 10px solid #0b0c0e; border-radius: 42px; overflow: hidden;
+             box-shadow: 0 30px 80px rgba(0, 0, 0, .5), 0 0 0 1px var(--line); }
+    .phone img { width: 100%; aspect-ratio: 390 / 700; object-fit: cover; object-position: top; }
+
+    /* Illustrations: two computers on a desk */
+    .desk { position: relative; aspect-ratio: 16 / 9; border-radius: 16px; background:
+            radial-gradient(circle at 30% 20%, #23303a, #181b20 70%); border: 1px solid var(--line); overflow: hidden; }
+    .monitor { position: absolute; top: 18%; width: 40%; aspect-ratio: 16 / 10; border-radius: 8px;
+               border: 6px solid #0b0c0e; box-shadow: 0 12px 30px rgba(0, 0, 0, .4); }
+    .monitor::after { content: ""; position: absolute; left: 42%; bottom: -26%; width: 16%; height: 20%;
+                      background: #0b0c0e; border-radius: 0 0 4px 4px; }
+    .monitor.left { left: 6%; background: linear-gradient(135deg, #3c5f9e, #7a4a98); }
+    .monitor.right { right: 6%; background: linear-gradient(135deg, #b85c46, #5a3278); }
+    .monitor .label { position: absolute; bottom: -54%; width: 100%; text-align: center; font-size: 13px; color: var(--muted); }
+    .monitor .win { position: absolute; background: #f4f5f7; border-radius: 4px; box-shadow: 0 4px 10px rgba(0, 0, 0, .3); }
+    .monitor .win::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 14%; min-height: 6px;
+                            background: #dde0e5; border-radius: 4px 4px 0 0; }
+    .cursor, .item { position: absolute; z-index: 3; top: 42%; left: 26%; }
+    .cursor svg { width: 22px; filter: drop-shadow(0 2px 3px rgba(0, 0, 0, .5)); }
+    .item { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 11px; color: #fff; }
+    .file { width: 34px; height: 42px; background: #fff; border-radius: 3px 10px 3px 3px; position: relative;
+            box-shadow: 0 6px 14px rgba(0, 0, 0, .35); }
+    .file::after { content: "PDF"; position: absolute; bottom: 6px; left: 0; right: 0; text-align: center;
+                   font-size: 9px; font-weight: 700; color: #c62828; }
+    .badge { position: absolute; top: -6px; right: -8px; background: #43a047; color: #fff; border-radius: 9px;
+             font-size: 10px; padding: 0 5px; font-weight: 700; }
+    .chip { position: absolute; z-index: 4; padding: 6px 12px; border-radius: 999px; font-size: 13px;
+            background: rgba(0, 0, 0, .6); border: 1px solid var(--line); white-space: nowrap; }
+
+    .visible .glide { animation: glide 6s ease-in-out infinite; }
+    @keyframes glide {
+      0%, 10% { left: 22%; top: 46%; }
+      45%, 60% { left: 72%; top: 40%; }
+      95%, 100% { left: 22%; top: 46%; }
+    }
+    .visible .carry { animation: carry 6s ease-in-out infinite; }
+    @keyframes carry {
+      0%, 12% { left: 18%; top: 40%; opacity: 1; }
+      55% { left: 74%; top: 52%; opacity: 1; }
+      75% { left: 74%; top: 52%; opacity: 1; }
+      85%, 100% { left: 74%; top: 52%; opacity: 0; }
+    }
+    .visible .landed { animation: landed 6s ease-in-out infinite; }
+    @keyframes landed { 0%, 72% { opacity: 0; } 80%, 100% { opacity: 1; } }
+    .visible .ghost-left { animation: ghost 6s ease-in-out infinite; }
+    @keyframes ghost { 0%, 80% { opacity: 1; } 90%, 100% { opacity: .15; } }
+    .visible .pop { animation: pop 6s ease-in-out infinite; }
+    @keyframes pop { 0%, 18% { opacity: 0; transform: translateY(6px); } 24%, 46% { opacity: 1; transform: none; }
+                     52%, 62% { opacity: 0; } 68%, 90% { opacity: 1; } 96%, 100% { opacity: 0; } }
+    .visible .pop2 { animation: pop2 6s ease-in-out infinite; }
+    @keyframes pop2 { 0%, 62% { opacity: 0; } 68%, 90% { opacity: 1; } 96%, 100% { opacity: 0; } }
+
+    /* Remote view: a window showing the other computer */
+    .viewer { position: absolute; left: 10%; top: 12%; width: 56%; aspect-ratio: 16 / 10; z-index: 3;
+              border-radius: 8px; overflow: hidden; border: 1px solid #3a3f46; background: #0b0c0e;
+              box-shadow: 0 20px 50px rgba(0, 0, 0, .6); }
+    .viewer .bar { height: 22px; background: #2a2d33; font-size: 11px; color: var(--muted); padding: 3px 10px; }
+    .viewer .screen { position: absolute; inset: 22px 0 0 0; transition: background 1s; }
+    .visible .viewer .screen { animation: screens 7s ease-in-out infinite; }
+    @keyframes screens {
+      0%, 45% { background: linear-gradient(135deg, #b85c46, #5a3278); }
+      55%, 100% { background: linear-gradient(135deg, #2e7d6f, #1f3f73); }
+    }
+
+    /* Small things */
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; padding: 40px 0 90px; }
+    .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
+    .card h3 { margin: 6px 0 8px; font-size: 19px; }
+    .card p { margin: 0; color: var(--muted); font-size: 15px; }
+    .card .ico { font-size: 26px; }
+
+    .support { text-align: center; padding: 90px 0; border-top: 1px solid var(--line); }
+    .support h2 { font-size: clamp(26px, 3.4vw, 36px); margin: 0 0 14px; }
+    .support p { color: var(--muted); max-width: 680px; margin: 0 auto 26px; }
+    .bouquet { max-width: 560px; margin: 0 auto 30px; }
+    footer { color: var(--muted); font-size: 14px; text-align: center; padding: 30px 0 50px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <a class="brand" href="#"><img src="img/icon.svg" width="30" height="30" alt="">DeskFlower</a>
+      <nav>
+        <a href="#keyboard">Features</a>
+        <a href="#phone">Phone</a>
+        <a href="#support">Support</a>
+        <a class="btn js-download" href="#">Download</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero wrap">
+      <img class="logo" src="img/icon.svg" alt="DeskFlower icon">
+      <h1>One keyboard and mouse<br>for <span>all your computers</span></h1>
+      <p>Move the cursor past the edge of the screen and keep working on the next computer.
+         Copy, paste and drag files between them as if they were one. On your local network, no accounts, no cloud.</p>
+      <div class="actions">
+        <a class="btn js-download" href="#">Download for Windows</a>
+        <a class="btn ghost js-source" href="#">Source code</a>
+      </div>
+      <p class="note">Free for personal use · Linux and macOS on the way</p>
+      <div class="shot reveal"><img class="media" src="img/screens.png" alt="DeskFlower window: the screens of two computers placed side by side" width="886" height="753"></div>
+    </section>
+
+    <div class="wrap">
+      <section class="feature reveal" id="keyboard">
+        <div class="text">
+          <div class="tag">Keyboard and mouse</div>
+          <h2>Cross the edge of the screen, you are on the other computer</h2>
+          <p>Place your computers' screens as they sit on your desk, and the mouse moves between them across
+             the edges they share. The keyboard follows, shortcuts included.</p>
+          <p>The cursor is only shown on the screen you are using, so you never lose it.</p>
+        </div>
+        <div class="desk media" aria-hidden="true">
+          <div class="monitor left"><div class="win" style="left:10%;top:12%;width:55%;height:45%"></div><div class="label">Office PC</div></div>
+          <div class="monitor right"><div class="win" style="left:30%;top:30%;width:60%;height:50%"></div><div class="label">Laptop</div></div>
+          <div class="cursor glide"><svg viewBox="0 0 24 24"><path d="M4 2l16 11-7 1.5L9.5 22z" fill="#fff" stroke="#000" stroke-width="1.2"/></svg></div>
+        </div>
+      </section>
+
+      <section class="feature reveal">
+        <div class="text">
+          <div class="tag">Clipboard</div>
+          <h2>Copy on one computer, paste on the other</h2>
+          <p>Text, images and files. Copying a file does not send anything yet: it only travels when you paste it,
+             straight to the folder you paste it into.</p>
+        </div>
+        <div class="desk media" aria-hidden="true">
+          <div class="monitor left"><div class="win" style="left:10%;top:15%;width:60%;height:55%"></div><div class="label">Office PC</div></div>
+          <div class="monitor right"><div class="win" style="left:25%;top:20%;width:62%;height:55%"></div><div class="label">Laptop</div></div>
+          <div class="chip pop" style="left:12%;top:70%">Ctrl + C &nbsp;report.pdf</div>
+          <div class="chip pop2" style="left:60%;top:70%">Ctrl + V &nbsp;✓ report.pdf</div>
+        </div>
+      </section>
+
+      <section class="feature reveal">
+        <div class="text">
+          <div class="tag">Drag and drop</div>
+          <h2>Drag files from one computer to another</h2>
+          <p>Pick up files on one computer and drop them on the other's desktop, into a folder or into an app.
+             You see the file being dragged all the way.</p>
+          <p>The files are moved safely: they are copied first, checked, and only then does the original go to
+             the Recycle Bin.</p>
+        </div>
+        <div class="desk media" aria-hidden="true">
+          <div class="monitor left"><div class="label">Office PC</div></div>
+          <div class="monitor right"><div class="win" style="left:12%;top:12%;width:50%;height:46%"></div><div class="label">Laptop</div></div>
+          <div class="item ghost-left" style="left:14%;top:30%"><div class="file"></div>report.pdf</div>
+          <div class="item carry"><div class="file"><span class="badge">1</span></div></div>
+          <div class="item landed" style="left:76%;top:46%"><div class="file"></div>report.pdf</div>
+        </div>
+      </section>
+
+      <section class="feature reveal">
+        <div class="text">
+          <div class="tag">Remote view</div>
+          <h2>See the other computer's screens</h2>
+          <p>Open a live view of a paired computer in a window, and work on it with your keyboard and mouse.
+             With several screens, the view moves to the next one as the mouse does.</p>
+          <p>Nobody watches a screen without its owner's permission.</p>
+        </div>
+        <div class="desk media" aria-hidden="true">
+          <div class="monitor left" style="width:70%;left:6%"></div>
+          <div class="viewer"><div class="bar">DeskFlower remote view · Laptop</div><div class="screen"></div></div>
+        </div>
+      </section>
+
+      <section class="feature reveal" id="phone">
+        <div class="text">
+          <div class="tag">Phone</div>
+          <h2>Send files from your phone, with a QR code</h2>
+          <p>Scan the code in DeskFlower with the phone's camera. Upload photos and files to the computer,
+             download from it, or send text straight to its clipboard. Nothing to install on the phone.</p>
+        </div>
+        <div class="phone media"><img src="img/phone.png" alt="DeskFlower's page on a phone: upload files, take a photo, send text, shared folder" width="780" height="1688"></div>
+      </section>
+
+      <section class="feature reveal">
+        <div class="text">
+          <div class="tag">Shared folder</div>
+          <h2>One folder for everything that arrives</h2>
+          <p>Files from your phone and from other computers land in a shared folder you choose, shown live in the app.</p>
+        </div>
+        <div class="shot media"><img src="img/files.png" alt="Files tab: shared folder, phone access QR code and files" width="886" height="753"></div>
+      </section>
+
+      <section class="feature reveal">
+        <div class="text">
+          <div class="tag">Pairing</div>
+          <h2>Pair once with a PIN, encrypted from then on</h2>
+          <p>Computers find each other on the local network. Confirm a PIN once and they are paired:
+             everything between them is encrypted, and only paired computers can connect.</p>
+        </div>
+        <div class="shot media"><img src="img/devices.png" alt="Devices tab: a paired laptop, connected" width="886" height="753"></div>
+      </section>
+    </div>
+
+    <section class="wrap reveal">
+      <div class="grid">
+        <div class="card"><div class="ico">🔄</div><h3>Updates itself</h3><p>Install a new version on one computer and the paired ones update from it, with signed packages.</p></div>
+        <div class="card"><div class="ico">🚀</div><h3>Starts with Windows</h3><p>It runs in the background and is ready when you sign in, also after an update.</p></div>
+        <div class="card"><div class="ico">🏠</div><h3>Stays at home</h3><p>No accounts and no servers: everything happens on your local network.</p></div>
+        <div class="card"><div class="ico">🌼</div><h3>A small bouquet</h3><p>One flower per connected computer, the same bouquet on all of them.</p></div>
+      </div>
+    </section>
+
+    <section class="support reveal" id="support">
+      <div class="wrap">
+        <img class="bouquet" src="img/bouquets.png" alt="Bouquets with one flower per computer" width="1368" height="170">
+        <h2>Free, with the source code open to read</h2>
+        <p>DeskFlower is free for personal use and its code is available. If you use it for work, or it simply saves
+           you time, buying a license (5 €, for life) or a coffee helps me keep it maintained and improving.</p>
+        <div class="actions" style="display:flex;gap:14px;justify-content:center;flex-wrap:wrap">
+          <a class="btn" href="https://ko-fi.com/bnogal">Support it on Ko-fi ♥</a>
+          <a class="btn ghost js-license" href="#">License details</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>DeskFlower · made to make my own day easier, shared in case it makes yours easier too</footer>
+
+  <script>
+    // The published repository (owner/name).
+    const REPO = 'bnogalm/DeskFlower';
+    const base = `https://github.com/${REPO}`;
+    document.querySelectorAll('.js-download').forEach(a => a.href = `${base}/releases/latest`);
+    document.querySelectorAll('.js-source').forEach(a => a.href = base);
+    document.querySelectorAll('.js-license').forEach(a => a.href = `${base}/blob/main/COMMERCIAL-LICENSE.md`);
+
+    // Each section appears as it scrolls into view.
+    const io = new IntersectionObserver(entries => {
+      for (const e of entries)
+        if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); }
+    }, { threshold: 0.2 });
+    document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+  </script>
+</body>
+</html>

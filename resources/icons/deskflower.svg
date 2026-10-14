@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Deskflower application icon: a desktop monitor with a flower growing on its screen.
+     Detailed variant, used from 64 px up. Rasterized by scripts/make-icons.py, which reads only
+     rect (rx), circle, ellipse and polygon with a flat fill and an optional rotate() transform. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- Stand -->
+  <polygon points="110,184 146,184 154,216 102,216" fill="#2e3c43"/>
+  <rect x="72" y="210" width="112" height="18" rx="9" fill="#455a64"/>
+  <!-- Monitor -->
+  <rect x="16" y="32" width="224" height="160" rx="22" fill="#455a64"/>
+  <rect x="30" y="46" width="196" height="132" rx="10" fill="#26a69a"/>
+  <!-- Stem and leaves, growing from the bottom of the screen -->
+  <rect x="124" y="108" width="8" height="70" fill="#c5e1a5"/>
+  <ellipse cx="146" cy="152" rx="17" ry="7" transform="rotate(-35 146 152)" fill="#c5e1a5"/>
+  <ellipse cx="110" cy="162" rx="14" ry="6" transform="rotate(35 110 162)" fill="#c5e1a5"/>
+  <!-- Flower: five petals around a yellow center -->
+  <ellipse cx="128" cy="85" rx="16" ry="21" fill="#ff7a8a"/>
+  <ellipse cx="128" cy="85" rx="16" ry="21" transform="rotate(72 128 106)" fill="#ff7a8a"/>
+  <ellipse cx="128" cy="85" rx="16" ry="21" transform="rotate(144 128 106)" fill="#ff7a8a"/>
+  <ellipse cx="128" cy="85" rx="16" ry="21" transform="rotate(216 128 106)" fill="#ff7a8a"/>
+  <ellipse cx="128" cy="85" rx="16" ry="21" transform="rotate(288 128 106)" fill="#ff7a8a"/>
+  <circle cx="128" cy="106" r="14" fill="#ffca28"/>
+  <circle cx="128" cy="106" r="6" fill="#ffa000"/>
+</svg>

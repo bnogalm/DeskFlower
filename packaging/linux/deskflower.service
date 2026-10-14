@@ -1,0 +1,12 @@
+[Unit]
+Description=DeskFlower service (shared keyboard, mouse and clipboard)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=/opt/deskflower/bin/deskflower-service
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
