@@ -75,6 +75,10 @@ public:
     // Remote view, master side: the device accepted (input may flow) / the view failed (go home).
     void setViewAccepted(const QByteArray &device);
     void cancelView();
+    // Master side: the cursor comes back to this device (centre of its primary screen) and
+    // capture ends, so the keyboard types here again. Used when this device locks or its session
+    // switches: what is typed on its lock screen (the password) must stay on it.
+    void returnHome();
     // Source side: ignore input from `peerId` while its view request is being decided locally.
     void setRemoteInputBlocked(const QByteArray &peerId, bool on);
 

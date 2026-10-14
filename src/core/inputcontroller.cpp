@@ -112,6 +112,14 @@ void InputController::sessionDisconnected()
         returnLocal(m_router.primaryCenter(m_node->id()), true);
 }
 
+void InputController::returnHome()
+{
+    if (m_active == m_node->id())
+        return;
+    qCInfo(lcInput) << "This device locked or switched sessions: input back home";
+    returnLocal(m_router.primaryCenter(m_node->id()), true);
+}
+
 void InputController::rebuild()
 {
     QHash<QByteArray, QList<ScreenInfo>> screens;

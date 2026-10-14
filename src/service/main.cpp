@@ -119,6 +119,15 @@ int runNode(int argc, char **argv, bool serviceMode)
     }
     df::Workspace workspace(&node, configDir);
     df::InputController input(&node, &workspace);
+    // Keys only go where the cursor is, and a device that locks (or switches sessions) takes the
+    // cursor back: the password typed on its lock screen is typed there, not on the device the
+    // cursor happened to be on.
+    QObject::connect(df::platform::SessionEvents::instance(), &df::platform::SessionEvents::sessionChanged, &input,
+                     [&input](df::platform::SessionEvents::Event event, quint32) {
+                         using E = df::platform::SessionEvents;
+                         if (event == E::Lock || event == E::Logoff || event == E::ConsoleDisconnect)
+                             input.returnHome();
+                     });
     df::Settings settings(configDir);
     df::FileTransfer transfer(&node);
     // Shared folder: chosen in the agent, or <user home>/Deskflower (looked up each time: users log

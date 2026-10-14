@@ -115,6 +115,9 @@ be arranged.
 - Leaving a device releases everything injected there. A device only obeys the current master.
   If the master disconnects, the device releases its keys. If the helper stops receiving the
   service's heartbeat for 3 s, it gives the input back.
+- Keys go only to the device the cursor is on. When the master locks, signs out or switches
+  sessions while the cursor is elsewhere, the cursor comes back to it first
+  (`InputController::returnHome`), so what is typed on its lock screen (the password) stays there.
 - As LocalSystem the helper's input thread follows the input desktop (Default, Winlogon), so it can
   also work on the lock screen and UAC prompts.
 - Platform backends (`src/session/inputbackend_*.cpp`, key tables in `src/core/keymap.*`):
@@ -202,6 +205,8 @@ goes to the device the cursor moves to next, and to no other one.
   on it, and only from the master or the device it was told to expect. Nothing is broadcast or
   relayed: a password copied on one computer reaches only the one you move to, and no paired device
   can replace another one's clipboard whenever it likes.
+- Copied passwords are shared like anything else (password managers' "do not share" marks are not
+  honoured on purpose): copying one and moving to another device is taken as wanting it there.
 
 - Formats: plain text, HTML and images (as PNG), up to 64 MB each. Small formats travel with the
   announcement over UDP; larger ones are fetched right away over encrypted TCP

@@ -127,6 +127,19 @@ private slots:
         QTest::qWait(300);
         ia.handleSessionMessage(cmd("edge", {{"s", int(Side::Right)}, {"x", 1919}, {"y", 500}}));
         QCOMPARE(ia.activeDevice(), b->id());
+
+        // A locks while the cursor is on B: the cursor comes home and what is typed next (the
+        // lock screen password) never reaches B.
+        QTRY_COMPARE(count(toB, "mabs") > 0, true);
+        const int keysOnB = count(toB, "key");
+        ia.returnHome();
+        QCOMPARE(ia.activeDevice(), a->id());
+        QCOMPARE(lastEvent(toA, "capture").value(QStringLiteral("on")).toBool(), false);
+        ia.handleSessionMessage(cmd("key", {{"s", 0x1E}, {"d", true}}));
+        ia.handleSessionMessage(cmd("key", {{"s", 0x1E}, {"d", false}}));
+        QTRY_COMPARE(count(toB, "releaseAll"), 2);
+        QTest::qWait(200);
+        QCOMPARE(count(toB, "key"), keysOnB);
     }
 
     void onlyTheMasterIsObeyed()
