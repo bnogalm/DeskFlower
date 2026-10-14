@@ -146,6 +146,9 @@ private slots:
         p.wa->setLocalScreens(twoScreens("A"));
         QVERIFY(p.start());
         QTRY_COMPARE(p.wb->screens(p.a->id()).size(), 2);
+        // B asks for A's thumbnails on connecting and A refuses (no view grant), which drops the ones
+        // B has: wait for that answer so it cannot arrive after the thumbnails sent below.
+        QTRY_VERIFY(p.wb->thumbnailsDenied(p.a->id()));
         QCborMap unknown;
         unknown.insert(QStringLiteral("t"), QStringLiteral("thumb"));
         unknown.insert(QStringLiteral("s"), QStringLiteral("nope"));
