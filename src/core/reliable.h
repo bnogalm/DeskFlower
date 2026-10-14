@@ -6,7 +6,10 @@
 //
 // Flow control is a simple AIMD congestion window (slow start, halve on loss) so a large transfer
 // (a clipboard image) does not overflow socket buffers; holes reported by the SACK bitmap are
-// retransmitted immediately instead of waiting for the timeout.
+// retransmitted immediately instead of waiting for the timeout. On a LAN the round trip is so short
+// that slow start would put a whole message on the wire at once, so the window has a ceiling that
+// fits a default Linux receive buffer (about 90 datagrams), and timed-out fragments are resent at
+// most a window at a time: resending them all together would overflow that buffer again.
 //
 // Inner packet formats (the first byte is the inner kind, see wire.h):
 //   Reliable: [kind][seq u32][flags u8][fragment]      flags bit0 = more fragments follow
@@ -27,6 +30,7 @@ public:
     static constexpr int kWindow = 1024;      // max packets in flight / receive reordering
     static constexpr double kInitialCwnd = 16;
     static constexpr double kMinCwnd = 4;
+    static constexpr double kMaxCwnd = 64;
     using Sender = std::function<void(const QByteArray &packet)>;
 
     explicit ReliableChannel(Sender sender);

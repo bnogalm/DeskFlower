@@ -16,12 +16,14 @@ class Link
 {
 public:
     // capacity: packets the link can hold in flight (a socket buffer); beyond that it drops.
-    Link(double loss, quint32 seed, int capacity = 1 << 30) : m_loss(loss), m_rng(seed), m_capacity(capacity) {}
+    // Each packet takes minDelay + up to jitter ms.
+    Link(double loss, quint32 seed, int capacity = 1 << 30, int minDelay = 5, int jitter = 40)
+        : m_loss(loss), m_rng(seed), m_capacity(capacity), m_minDelay(minDelay), m_jitter(jitter) {}
     void push(const QByteArray &packet, qint64 now)
     {
         if (m_rng.generateDouble() < m_loss || int(m_queue.size()) >= m_capacity)
             return;
-        m_queue.push_back({now + 5 + m_rng.bounded(40), packet});
+        m_queue.push_back({now + m_minDelay + m_rng.bounded(m_jitter), packet});
     }
     QList<QByteArray> due(qint64 now)
     {
@@ -41,6 +43,8 @@ private:
     double m_loss;
     QRandomGenerator m_rng;
     int m_capacity;
+    int m_minDelay;
+    int m_jitter;
     std::vector<InFlight> m_queue;
 };
 } // namespace
@@ -120,6 +124,32 @@ private slots:
         // ~1900 packets at <= 48 per ~25 ms round trip: about one second of simulated time.
         qInfo() << "2 MB delivered in" << now << "ms of simulated time";
         QVERIFY2(now < 3000, qPrintable(QString::number(now)));
+    }
+
+    void messageBurstOnALan()
+    {
+        // A LAN (sub-millisecond round trip) into a small receive buffer, as Linux's default one:
+        // slow start must not put the whole message on the wire at once, and the resends after a
+        // timeout must not overflow the buffer again each time.
+        qint64 now = 0;
+        Link ab(0.0, 5, 40, 0, 1), ba(0.0, 6, 1 << 30, 0, 1);
+        ReliableChannel a([&](const QByteArray &p) { ab.push(p, now); });
+        ReliableChannel b([&](const QByteArray &p) { ba.push(p, now); });
+        const QByteArray big(300 * 1024, 'b');
+        a.send(big, now);
+        a.send("after", now);
+        QList<QByteArray> received;
+        for (; now < 30000 && received.size() < 2; now += 1) {
+            for (const QByteArray &p : ab.due(now))
+                received += b.receive(p, now);
+            for (const QByteArray &p : ba.due(now))
+                a.receive(p, now);
+            a.tick(now);
+        }
+        QCOMPARE(received.size(), 2);
+        QCOMPARE(received.first(), big);
+        qInfo() << "300 KB delivered in" << now << "ms of simulated time";
+        QVERIFY2(now < 1000, qPrintable(QString::number(now)));
     }
 
     void emptyMessage()

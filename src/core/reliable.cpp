@@ -71,9 +71,13 @@ void ReliableChannel::onLoss(quint32 seq)
 
 void ReliableChannel::tick(qint64 nowMs)
 {
+    int budget = std::max(1, int(m_cwnd)); // oldest first; the rest on a later tick
     for (auto &[seq, p] : m_inFlight) {
+        if (budget == 0)
+            break;
         const int backoff = std::min(kMaxRto, m_rto << std::min(p.retries, 5));
         if (nowMs - p.sentAt >= backoff) {
+            --budget;
             onLoss(seq);
             m_sender(p.packet);
             p.sentAt = nowMs;
@@ -104,7 +108,7 @@ void ReliableChannel::handleAck(quint32 next, quint32 sack, qint64 nowMs)
         if (acked) {
             ackSample(it->second, nowMs);
             // Slow start below the threshold, then about one packet per window.
-            m_cwnd = std::min<double>(kWindow, m_cwnd + (m_cwnd < m_ssthresh ? 1.0 : 1.0 / m_cwnd));
+            m_cwnd = std::min<double>(kMaxCwnd, m_cwnd + (m_cwnd < m_ssthresh ? 1.0 : 1.0 / m_cwnd));
             it = m_inFlight.erase(it);
         } else {
             ++it;

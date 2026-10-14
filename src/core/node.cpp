@@ -78,6 +78,8 @@ struct Node::Peer {
     quint64 lastHandshakeTimestamp = 0;
 
     ReliableChannel reliable;
+    qint64 backlogSince = -1;   // oldest moment with unacknowledged reliable data (diagnostics)
+    qint64 backlogLoggedAt = 0;
     QByteArray remoteBoot;
 };
 
@@ -568,8 +570,10 @@ void Node::handleData(const QByteArray &packet, const QHostAddress &from, quint1
     } else if (p.previous && p.previous->localIndex() == index) {
         inner = p.previous->open(packet, now);
     }
-    if (!inner || inner->isEmpty())
+    if (!inner || inner->isEmpty()) {
+        ++m_rejectedPackets;
         return;
+    }
 
     setPeerAddress(p, from, port);
     setConnected(p, true);
@@ -716,7 +720,8 @@ void Node::sendInner(Peer &peer, const QByteArray &inner)
 {
     if (!peer.current || !peer.current->isConfirmed() || peer.addr.isNull())
         return;
-    m_socket.writeDatagram(peer.current->seal(inner, nowMs()), peer.addr, peer.port);
+    if (m_socket.writeDatagram(peer.current->seal(inner, nowMs()), peer.addr, peer.port) < 0)
+        ++m_failedSends; // a full socket buffer: the reliable channel resends
 }
 
 void Node::setConnected(Peer &peer, bool connected)
@@ -826,6 +831,19 @@ void Node::onTick()
         }
 
         p.reliable.tick(now);
+        // Reliable data that stays unacknowledged for long is worth a line in the debug log.
+        if (p.reliable.unacked() == 0) {
+            p.backlogSince = -1;
+        } else if (p.backlogSince < 0) {
+            p.backlogSince = now;
+        } else if (now - p.backlogSince > 2000 && now - p.backlogLoggedAt > 2000) {
+            p.backlogLoggedAt = now;
+            qCDebug(lcNode).nospace() << "Reliable backlog to " << p.name << ": " << p.reliable.unacked()
+                                      << " fragments for " << (now - p.backlogSince) << " ms, window "
+                                      << p.reliable.congestionWindow() << ", timeout " << p.reliable.rtoMs()
+                                      << " ms; failed sends " << m_failedSends << ", rejected packets "
+                                      << m_rejectedPackets;
+        }
         if (p.current && now - p.current->lastSent() > kKeepaliveMs)
             sendInner(p, QByteArray(1, char(wire::Inner::Keepalive)));
         ++it;

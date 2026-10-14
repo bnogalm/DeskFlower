@@ -78,6 +78,7 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
+          QT_LOGGING_RULES: deskflower.node.debug=true
         # Qt's OpenSSL TLS backend loads libssl at run time (the phone server needs it).
         run: |
           export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix openssl@3)/lib"

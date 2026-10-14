@@ -138,6 +138,8 @@ private:
     Identity m_identity;
     PeerStore m_store;
     QUdpSocket m_socket;
+    quint64 m_failedSends = 0;      // diagnostics
+    quint64 m_rejectedPackets = 0;
     QUdpSocket m_discovery;
     QTcpServer m_tcp;
     QTimer m_tick;
