@@ -192,6 +192,7 @@ bool PhoneServer::start(QString *error)
         *error = QStringLiteral("TLS is not available (OpenSSL libraries missing)");
         return false;
     }
+    qCInfo(lcPhone) << "TLS backend" << QSslSocket::activeBackend();
 
     const QString host = QHostInfo::localHostName();
     QStringList ips = lanAddresses();
