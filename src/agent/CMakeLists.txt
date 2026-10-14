@@ -51,7 +51,7 @@ deskflower_add_app_icon(deskflower-agent)
 
 if(WIN32)
     target_sources(deskflower-agent PRIVATE filedragagent.h filedragagent_win.cpp)
-    target_link_libraries(deskflower-agent PRIVATE ole32 shell32 shlwapi)
+    target_link_libraries(deskflower-agent PRIVATE ole32 shell32 shlwapi advapi32)
 else()
     target_sources(deskflower-agent PRIVATE filedragagent.h filedragagent_other.cpp)
 endif()

@@ -12,6 +12,7 @@
 #include <QNetworkReply>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QSslSocket>
 #include <QTest>
 #include <QUrlQuery>
 
@@ -243,6 +244,22 @@ private slots:
         QCOMPARE(request(m_phone, "POST", url("/api/text"), "hola desde el móvil").status, 200);
         QCOMPARE(text.size(), 1);
         QCOMPARE(text.first().at(0).toString(), QString("hola desde el móvil"));
+    }
+
+    void strangersCannotSendBodies()
+    {
+        // Headers announcing a large upload, without a session: refused before any body is read.
+        QSslSocket socket;
+        socket.setPeerVerifyMode(QSslSocket::VerifyNone);
+        socket.connectToHostEncrypted(QStringLiteral("127.0.0.1"), m_server->port());
+        connect(&socket, &QSslSocket::sslErrors, &socket, [&socket] { socket.ignoreSslErrors(); });
+        QTRY_VERIFY(socket.isEncrypted()); // the server runs on this thread: no blocking waits
+        socket.write("PUT /api/upload?name=x.bin&offset=0&total=5000000 HTTP/1.1\r\nHost: x\r\n"
+                     "Content-Length: 5000000\r\n\r\n");
+        QByteArray answer;
+        QTRY_VERIFY(!(answer += socket.readAll()).isEmpty());
+        QVERIFY2(answer.startsWith("HTTP/1.1 401"), answer.constData());
+        QTRY_VERIFY(socket.state() == QAbstractSocket::UnconnectedState);
     }
 
     void protocolLimits()

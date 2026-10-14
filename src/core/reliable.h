@@ -31,6 +31,8 @@ public:
     static constexpr double kInitialCwnd = 16;
     static constexpr double kMinCwnd = 4;
     static constexpr double kMaxCwnd = 64;
+    // Larger messages are dropped on arrival (bulk data travels over TCP streams).
+    static constexpr int kMaxMessage = 8 * 1024 * 1024;
     using Sender = std::function<void(const QByteArray &packet)>;
 
     explicit ReliableChannel(Sender sender);
@@ -77,6 +79,7 @@ private:
     quint32 m_expected = 0;
     std::map<quint32, QByteArray> m_outOfOrder; // seq -> [flags][fragment]
     QByteArray m_partial;
+    bool m_oversized = false; // dropping the rest of a message larger than kMaxMessage
 };
 
 } // namespace df

@@ -24,6 +24,11 @@ SecureStream::SecureStream(QTcpSocket *socket, const crypto::KeyPair &local, QOb
     m_handshakeTimer.setInterval(kHandshakeTimeoutMs);
     connect(&m_handshakeTimer, &QTimer::timeout, this, [this] { fail(QStringLiteral("Handshake timed out")); });
     m_handshakeTimer.start();
+
+    m_idleTimer.setSingleShot(true);
+    m_idleTimer.setInterval(kIdleTimeoutMs);
+    connect(&m_idleTimer, &QTimer::timeout, this, [this] { fail(QStringLiteral("Idle for too long")); });
+    connect(m_socket, &QTcpSocket::bytesWritten, &m_idleTimer, qOverload<>(&QTimer::start));
 }
 
 SecureStream::~SecureStream()
@@ -97,12 +102,15 @@ void SecureStream::fail(const QString &reason)
         return;
     m_state = State::Closed;
     m_handshakeTimer.stop();
+    m_idleTimer.stop();
     m_socket->abort();
     emit closed(reason);
 }
 
 void SecureStream::onReadyRead()
 {
+    if (m_state == State::Established)
+        m_idleTimer.start();
     m_buffer += m_socket->readAll();
     while (m_buffer.size() >= 4 && m_state != State::Closed && m_state != State::Closing) {
         const quint32 len = qFromBigEndian<quint32>(m_buffer.constData());
@@ -139,9 +147,21 @@ void SecureStream::handleFrame(const QByteArray &frame)
         m_sendKey = keys->sendKey;
         m_recvKey = keys->recvKey;
         writeFrame(message2);
+        m_state = State::AwaitingFirstFrame; // still under the handshake timeout
+        break;
+    }
+    case State::AwaitingFirstFrame: {
+        const auto plaintext = crypto::aeadDecrypt(m_recvKey, m_recvCounter++, {}, frame);
+        if (!plaintext) {
+            fail(QStringLiteral("Peer authentication failed"));
+            return;
+        }
         m_state = State::Established;
         m_handshakeTimer.stop();
+        m_idleTimer.start();
         emit established();
+        if (m_state == State::Established)
+            emit received(*plaintext);
         break;
     }
     case State::AwaitingResponse: {
@@ -155,6 +175,7 @@ void SecureStream::handleFrame(const QByteArray &frame)
         m_recvKey = keys->recvKey;
         m_state = State::Established;
         m_handshakeTimer.stop();
+        m_idleTimer.start();
         emit established();
         break;
     }

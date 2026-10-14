@@ -5,10 +5,12 @@
 #include "platform/platform.h"
 
 #include <QCborArray>
+#include <QCoreApplication>
 #include <QDir>
 #include <QLocalSocket>
 #include <QLoggingCategory>
 #include <QPointer>
+#include <QTimer>
 #include <utility>
 
 Q_LOGGING_CATEGORY(lcService, "deskflower.service")
@@ -451,6 +453,11 @@ void ServiceController::handleCommand(ipc::Connection *conn, const QCborMap &msg
     }
     if (cmd == QLatin1String("getState")) {
         conn->send(stateEvent());
+    } else if (cmd == QLatin1String("stopService")) {
+        // The user quit DeskFlower: everything stops (network, phone access, session helper)
+        // until the agent starts the service again, or the next boot does.
+        qInfo() << "Stopped by the user";
+        QTimer::singleShot(100, QCoreApplication::instance(), &QCoreApplication::quit);
     } else if (cmd == QLatin1String("setExploring")) {
         m_node->setExploring(msg.value(QStringLiteral("on")).toBool());
     } else if (cmd == QLatin1String("pair")) {
@@ -720,6 +727,8 @@ QCborMap ServiceController::stateEvent() const
 
     QCborArray peers;
     for (const PeerView &p : m_node->peers()) {
+        if (p.otherUser)
+            continue; // another user's pairing: not theirs to see or use
         QCborMap m;
         m.insert(QStringLiteral("id"), hexId(p.id));
         m.insert(QStringLiteral("name"), p.name);

@@ -48,6 +48,9 @@ const char *reasonPhrase(int status)
 struct HttpServer::Connection {
     QSslSocket *socket = nullptr;
     QTimer *idle = nullptr;
+    QTimer *headers = nullptr; // a request's headers must arrive in time (slow clients hold slots)
+    QHostAddress address;
+    bool admitted = false; // the gate accepted the body of the request being read
     QByteArray input;
     std::unique_ptr<QIODevice> stream; // response being streamed
     bool closeAfterResponse = false;
@@ -72,6 +75,7 @@ bool HttpServer::listen(const QSslConfiguration &tls, const QHostAddress &addres
     auto *server = new QSslServer(this);
     server->setSslConfiguration(tls);
     server->setHandshakeTimeout(kHandshakeTimeoutMs);
+    server->setMaxPendingConnections(16); // TLS handshakes in progress count too
     // Handshake failures are routine: phones refuse the self-signed certificate until the user
     // accepts it.
     connect(server, &QSslServer::errorOccurred, this, [](QSslSocket *, QAbstractSocket::SocketError e) {
@@ -96,18 +100,29 @@ void HttpServer::onNewConnection()
         auto *socket = qobject_cast<QSslSocket *>(m_server->nextPendingConnection());
         if (!socket)
             continue;
-        if (m_connections.size() >= kMaxConnections) {
+        const QHostAddress address = socket->peerAddress();
+        const auto fromAddress = std::count_if(m_connections.cbegin(), m_connections.cend(),
+                                               [&address](const Connection *c) { return c->address == address; });
+        if (m_connections.size() >= kMaxConnections || fromAddress >= kMaxConnectionsPerAddress) {
             socket->abort();
             socket->deleteLater();
             continue;
         }
         auto *c = new Connection;
         c->socket = socket;
+        c->address = address;
         c->idle = new QTimer(socket);
         c->idle->setSingleShot(true);
         c->idle->setInterval(kIdleTimeoutMs);
+        c->headers = new QTimer(socket);
+        c->headers->setSingleShot(true);
+        c->headers->setInterval(kHeaderTimeoutMs);
         m_connections.insert(socket, c);
         connect(c->idle, &QTimer::timeout, this, [this, c] { drop(c); });
+        connect(c->headers, &QTimer::timeout, this, [this, c] {
+            qCDebug(lcHttp) << "Request headers too slow from" << c->address;
+            drop(c);
+        });
         connect(socket, &QSslSocket::readyRead, this, [this, c] {
             c->idle->start();
             c->input += c->socket->readAll();
@@ -142,8 +157,11 @@ void HttpServer::processInput(Connection *c)
         if (headerEnd < 0) {
             if (c->input.size() > kMaxHeaderBytes)
                 send(c, HttpResponse(431), false);
+            else if (!c->input.isEmpty() && !c->headers->isActive())
+                c->headers->start();
             return;
         }
+        c->headers->stop();
         if (headerEnd > kMaxHeaderBytes)
             return send(c, HttpResponse(431), false);
 
@@ -178,6 +196,17 @@ void HttpServer::processInput(Connection *c)
                 return send(c, HttpResponse(400), false);
         }
         const qint64 total = headerEnd + 4 + length;
+        const QByteArray target = requestLine.at(1);
+        const qsizetype q = target.indexOf('?');
+        request.path = QUrl::fromPercentEncoding(q < 0 ? target : target.left(q));
+        if (q >= 0)
+            request.query = QUrlQuery(QString::fromUtf8(target.mid(q + 1)));
+        request.remoteAddress = c->address;
+        if (length > 0 && !c->admitted) {
+            if (m_gate && !m_gate(request))
+                return send(c, HttpResponse(401), false);
+            c->admitted = true;
+        }
         if (length > m_maxBody) {
             if (length > kMaxDiscardBytes)
                 return send(c, HttpResponse(413), false);
@@ -193,14 +222,9 @@ void HttpServer::processInput(Connection *c)
             return; // wait for the rest of the body
         }
         c->sentContinue = false;
+        c->admitted = false;
 
-        const QByteArray target = requestLine.at(1);
-        const qsizetype q = target.indexOf('?');
-        request.path = QUrl::fromPercentEncoding(q < 0 ? target : target.left(q));
-        if (q >= 0)
-            request.query = QUrlQuery(QString::fromUtf8(target.mid(q + 1)));
         request.body = c->input.mid(headerEnd + 4, length);
-        request.remoteAddress = c->socket->peerAddress();
         c->input.remove(0, total);
 
         const QByteArray connection = request.header("connection").toLower();
@@ -256,6 +280,7 @@ void HttpServer::drop(Connection *c)
     if (!m_connections.remove(c->socket))
         return;
     c->idle->stop();
+    c->headers->stop();
     c->socket->disconnect(this);
     c->socket->abort();
     c->socket->deleteLater(); // also deletes the idle timer

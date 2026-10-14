@@ -5,7 +5,10 @@
 //
 // Scope: what a browser on the local network needs. Persistent connections, one request at a time
 // per connection, Content-Length bodies (no chunked uploads), responses from memory or streamed
-// from a device. Limits on header size, body size, connections and idle time protect the service.
+// from a device. Limits on header size, body size, connections (in total and per address), header
+// time and idle time protect the service, and a request body is only read once the gate accepts
+// the request's headers (the phone server: a valid session), so strangers cannot make it buffer
+// uploads.
 
 #include <QByteArray>
 #include <QHash>
@@ -60,10 +63,17 @@ public:
 
     static constexpr int kMaxHeaderBytes = 16 * 1024;
     static constexpr int kMaxConnections = 64;
+    static constexpr int kMaxConnectionsPerAddress = 16;
     static constexpr int kIdleTimeoutMs = 60 * 1000;
+    static constexpr int kHeaderTimeoutMs = 15 * 1000; // first byte of a request -> end of its headers
+
+    // Decides from the headers (no body yet) whether a request with a body may send it; refused
+    // ones get 401 and the connection is closed.
+    using Gate = std::function<bool(const HttpRequest &)>;
 
     // maxBodyBytes: larger requests are answered with 413.
     explicit HttpServer(Handler handler, qint64 maxBodyBytes, QObject *parent = nullptr);
+    void setBodyGate(Gate gate) { m_gate = std::move(gate); }
     ~HttpServer() override;
 
     bool listen(const QSslConfiguration &tls, const QHostAddress &address, quint16 port, QString *error);
@@ -80,6 +90,7 @@ private:
     void drop(Connection *c);
 
     Handler m_handler;
+    Gate m_gate;
     qint64 m_maxBody;
     QSslServer *m_server = nullptr;
     QHash<QSslSocket *, Connection *> m_connections;

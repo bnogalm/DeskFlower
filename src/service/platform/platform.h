@@ -40,6 +40,13 @@ QString defaultConfigDir(bool serviceMode);
 // Empty if nobody is logged on.
 QString interactiveUserHome(bool serviceMode);
 
+// Whether this service serves several users of the device (Windows service mode), so that each
+// pairing belongs to the user who made it (Node::setLocalUser).
+bool separatesUsers(bool serviceMode);
+// Who is signed in at the console now, as a stable id (Windows: the user's SID). Empty if nobody
+// is (or when the service does not separate users).
+QString interactiveUserId(bool serviceMode);
+
 // Whether `path` may be the shared folder. Windows service mode: inside the console user's home,
 // and reached without links, because the service writes and serves files there as LocalSystem.
 // Otherwise any absolute path (the service runs as the user). `why` says what is wrong.

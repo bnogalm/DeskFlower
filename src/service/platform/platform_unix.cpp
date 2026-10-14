@@ -174,6 +174,10 @@ quint32 activeConsoleSession() { return kNoSession; }
 
 QString interactiveUserHome(bool) { return QDir::homePath(); }
 
+bool separatesUsers(bool) { return false; } // the service runs as the user
+
+QString interactiveUserId(bool) { return {}; }
+
 std::shared_ptr<void> actAsInteractiveUser(bool)
 {
     return std::make_shared<int>(0); // the service runs as the user

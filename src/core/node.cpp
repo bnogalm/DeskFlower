@@ -28,6 +28,11 @@ constexpr int kUntrustedExpiryMs = 15000;
 constexpr int kAddressStaleMs = 5000;
 constexpr int kBeaconExploringMs = 1000;
 constexpr int kBeaconIdleMs = 3000;
+// Limits on unauthenticated traffic and on what it can make us keep.
+constexpr int kMaxUntrustedPeers = 64;
+constexpr int kQueryAnswerMs = 500; // one answer to beacon queries per sender and interval
+constexpr int kMaxPendingStreams = 16;
+constexpr int kMaxStreamsPerPeer = 32;
 
 const QString kT = QStringLiteral("t");
 const QString kB = QStringLiteral("b");
@@ -83,7 +88,26 @@ struct Node::Peer {
     QByteArray remoteBoot;
 };
 
-Node::Node(Options options, QObject *parent) : QObject(parent), m_options(std::move(options)) {}
+bool Node::RateLimit::take(qint64 nowMs)
+{
+    tokens = std::min(burst, tokens + double(nowMs - last) * perSecond / 1000.0);
+    last = nowMs;
+    if (tokens < 1)
+        return false;
+    tokens -= 1;
+    return true;
+}
+
+// A device sends a beacon per interface every second while exploring; a handshake per peer every
+// couple of minutes (or every second while reconnecting); pairing, a few packets per attempt.
+Node::Node(Options options, QObject *parent)
+    : QObject(parent),
+      m_options(std::move(options)),
+      m_beaconLimit(100, 200),
+      m_handshakeLimit(20, 40),
+      m_pairingLimit(20, 40)
+{
+}
 
 Node::~Node() = default;
 
@@ -121,16 +145,44 @@ bool Node::start(QString *error)
     if (m_tcp.listen(QHostAddress::AnyIPv4, m_socket.localPort()) || m_tcp.listen(QHostAddress::AnyIPv4, 0)) {
         connect(&m_tcp, &QTcpServer::newConnection, this, [this] {
             while (QTcpSocket *socket = m_tcp.nextPendingConnection()) {
+                // Connections that have not authenticated yet are few and short-lived
+                // (SecureStream::kHandshakeTimeoutMs), so that they cannot pile up.
+                if (m_pendingStreams >= kMaxPendingStreams) {
+                    socket->abort();
+                    socket->deleteLater();
+                    continue;
+                }
                 auto trust = [this](const QByteArray &remoteStatic) -> std::optional<QByteArray> {
                     const QByteArray id = crypto::deviceIdFromPublicKey(remoteStatic);
                     const TrustedPeer *peer = m_store.find(id);
-                    if (!peer || peer->publicKey != remoteStatic)
+                    if (!peer || peer->publicKey != remoteStatic || !isUsable(id))
+                        return std::nullopt;
+                    if (m_acceptedStreams[id] >= kMaxStreamsPerPeer)
                         return std::nullopt;
                     return id;
                 };
                 SecureStream *stream = SecureStream::accept(socket, m_identity.keys(), trust, this);
-                connect(stream, &SecureStream::established, this, [this, stream] { emit streamAccepted(stream); });
+                ++m_pendingStreams;
+                auto pending = std::make_shared<bool>(true);
+                auto settle = [this, pending] {
+                    if (*pending) {
+                        *pending = false;
+                        --m_pendingStreams;
+                    }
+                };
+                connect(stream, &SecureStream::established, this, [this, stream, settle] {
+                    settle();
+                    const QByteArray peer = stream->peerId();
+                    ++m_acceptedStreams[peer];
+                    connect(stream, &QObject::destroyed, this, [this, peer] {
+                        auto it = m_acceptedStreams.find(peer);
+                        if (it != m_acceptedStreams.end() && --it->second <= 0)
+                            m_acceptedStreams.erase(it);
+                    });
+                    emit streamAccepted(stream);
+                });
                 // Accepted streams live until they close.
+                connect(stream, &SecureStream::closed, this, settle);
                 connect(stream, &SecureStream::closed, stream, &QObject::deleteLater);
             }
         });
@@ -240,6 +292,7 @@ QList<PeerView> Node::peers() const
         v.port = p->port;
         v.trusted = trusted;
         v.allowView = isViewAllowed(id);
+        v.otherUser = trusted && !isUsable(id);
         v.connected = p->connected;
         v.exploring = p->exploring && p->lastSeen >= 0 && now - p->lastSeen < kUntrustedExpiryMs;
         if (trusted) {
@@ -267,7 +320,7 @@ bool Node::isViewAllowed(const QByteArray &peerId) const
 
 void Node::setViewAllowed(const QByteArray &peerId, bool on)
 {
-    if (!m_store.contains(peerId) || isViewAllowed(peerId) == on)
+    if (!m_store.contains(peerId) || !isUsable(peerId) || isViewAllowed(peerId) == on)
         return;
     m_store.setAllowView(peerId, on);
     emit peersChanged();
@@ -293,8 +346,8 @@ void Node::cancelPairing(const QByteArray &peerId) { m_pairing->cancel(peerId); 
 void Node::unpair(const QByteArray &peerId)
 {
     auto it = m_peers.find(peerId);
-    if (it == m_peers.end() || !m_store.contains(peerId))
-        return;
+    if (it == m_peers.end() || !m_store.contains(peerId) || !isUsable(peerId))
+        return; // another user's pairing is theirs to remove
     Peer &p = *it->second;
     if (p.connected) {
         QCborMap m;
@@ -311,7 +364,7 @@ void Node::unpair(const QByteArray &peerId)
 bool Node::sendMessage(const QByteArray &peerId, const QCborMap &message)
 {
     auto it = m_peers.find(peerId);
-    if (it == m_peers.end() || !m_store.contains(peerId))
+    if (it == m_peers.end() || !m_store.contains(peerId) || !isUsable(peerId))
         return false;
     it->second->reliable.send(QCborValue(message).toCbor(), nowMs());
     return true;
@@ -330,7 +383,7 @@ SecureStream *Node::openStream(const QByteArray &peerId)
 {
     auto it = m_peers.find(peerId);
     const TrustedPeer *trusted = m_store.find(peerId);
-    if (it == m_peers.end() || !trusted || it->second->addr.isNull())
+    if (it == m_peers.end() || !trusted || !isUsable(peerId) || it->second->addr.isNull())
         return nullptr;
     const Peer &p = *it->second;
     return SecureStream::connectTo(m_identity.keys(), trusted->publicKey, peerId, p.addr,
@@ -378,6 +431,8 @@ void Node::handlePacket(const QByteArray &packet, const QHostAddress &from, quin
         return;
     switch (*type) {
     case wire::Type::Beacon:
+        if (!m_beaconLimit.take(nowMs()))
+            break;
         if (auto msg = wire::parseCborPacket(packet))
             handleBeacon(*msg, from, port, viaDataSocket);
         break;
@@ -388,13 +443,14 @@ void Node::handlePacket(const QByteArray &packet, const QHostAddress &from, quin
     case wire::Type::PairMsg3:
     case wire::Type::PairDone:
     case wire::Type::PairAbort:
-        if (viaDataSocket) {
+        if (viaDataSocket && m_pairingLimit.take(nowMs())) {
             if (auto msg = wire::parseCborPacket(packet))
                 m_pairing->handlePacket(*type, *msg, from, port);
         }
         break;
     case wire::Type::HandshakeInit:
-        if (viaDataSocket)
+        // Costs two key exchanges before the sender is known.
+        if (viaDataSocket && m_handshakeLimit.take(nowMs()))
             handleHandshakeInit(packet, from, port);
         break;
     case wire::Type::HandshakeResp:
@@ -415,10 +471,31 @@ void Node::handleBeacon(const QCborMap &msg, const QHostAddress &from, quint16 p
     if (id == m_identity.id() || pub.size() != crypto::kKeySize || crypto::deviceIdFromPublicKey(pub) != id)
         return;
 
-    if (viaDataSocket && msg.value(kQ).toBool())
-        m_socket.writeDatagram(beaconPacket(false), from, port);
+    const qint64 now = nowMs();
+    if (viaDataSocket && msg.value(kQ).toBool()) {
+        // Answered at most once per interval and sender: a forged source address must not turn
+        // us into a traffic reflector.
+        if (m_queryAnswered.size() > 256) {
+            for (auto it = m_queryAnswered.begin(); it != m_queryAnswered.end();)
+                it = now - it.value() > kQueryAnswerMs ? m_queryAnswered.erase(it) : std::next(it);
+        }
+        const auto sender = std::make_pair(from, port);
+        auto it = m_queryAnswered.find(sender);
+        if (it == m_queryAnswered.end() || now - it.value() > kQueryAnswerMs) {
+            m_queryAnswered.insert(sender, now);
+            m_socket.writeDatagram(beaconPacket(false), from, port);
+        }
+    }
 
     const bool trusted = m_store.contains(id);
+    if (!trusted && !m_peers.count(id)) {
+        // Unknown devices cost memory and screen space until they expire: keep a bounded number.
+        int untrusted = 0;
+        for (const auto &[peerId, peer] : m_peers)
+            untrusted += m_store.contains(peerId) ? 0 : 1;
+        if (untrusted >= kMaxUntrustedPeers)
+            return;
+    }
     Peer &p = peerFor(id);
     const bool wasVisible = p.lastSeen >= 0 && nowMs() - p.lastSeen < kUntrustedExpiryMs;
     const QString name = msg.value(kN).toString().left(64);
@@ -429,21 +506,21 @@ void Node::handleBeacon(const QCborMap &msg, const QHostAddress &from, quint16 p
 
     if (!wasVisible)
         qCInfo(lcNode) << "Discovered" << name << from.toString() << port << (trusted ? "(trusted)" : "");
-    bool changed = !wasVisible || p.name != name || p.os != os || p.exploring != exploring;
-    p.lastSeen = nowMs();
-    p.name = name;
+    // Beacons are unauthenticated: a paired device keeps the name from its authenticated hello
+    // (anyone can send a beacon with its id and another name).
+    bool changed = !wasVisible || p.os != os || p.exploring != exploring || (!trusted && p.name != name);
+    p.lastSeen = now;
+    if (!trusted) {
+        p.name = name;
+        p.publicKey = pub;
+    }
     p.os = os;
     p.exploring = exploring;
     if (!p.connected) // while connected, the authenticated hello is the source of truth
         p.tcpPort = quint16(msg.value(QStringLiteral("tp")).toInteger());
-    if (!trusted)
-        p.publicKey = pub;
-    else
-        m_store.rename(id, name);
 
     // A host with several interfaces sends a beacon from each one: stick to the current address
     // while it keeps answering. Beacons are unauthenticated, so they never move a live session.
-    const qint64 now = nowMs();
     if (p.addr == from && p.port == dataPort) {
         p.addrSeen = now;
     } else if (!p.connected && (p.addr.isNull() || now - p.addrSeen > kAddressStaleMs)) {
@@ -469,7 +546,7 @@ void Node::handleHandshakeInit(const QByteArray &packet, const QHostAddress &fro
         return;
     const QByteArray id = crypto::deviceIdFromPublicKey(*remoteStatic);
     const TrustedPeer *trusted = m_store.find(id);
-    if (!trusted || trusted->publicKey != *remoteStatic)
+    if (!trusted || trusted->publicKey != *remoteStatic || !isUsable(id))
         return;
 
     const QCborMap info = QCborValue::fromCbor(payload).toMap();
@@ -629,8 +706,16 @@ void Node::handleControlMessage(Peer &peer, const QCborMap &msg)
     }
 }
 
-void Node::onPairingSucceeded(const TrustedPeer &trusted, const QHostAddress &addr, quint16 port)
+void Node::onPairingSucceeded(const TrustedPeer &paired, const QHostAddress &addr, quint16 port)
 {
+    TrustedPeer trusted = paired;
+    if (m_usersSeparate) {
+        if (m_localUser.isEmpty()) {
+            emit pairingFinished(trusted.id, false, tr("Nobody is signed in on this device"));
+            return;
+        }
+        trusted.owner = m_localUser;
+    }
     m_store.upsert(trusted);
     Peer &p = peerFor(trusted.id);
     p.publicKey = trusted.publicKey;
@@ -645,6 +730,42 @@ void Node::onPairingSucceeded(const TrustedPeer &trusted, const QHostAddress &ad
 }
 
 // --- Sending / housekeeping --------------------------------------------------------------------
+
+bool Node::isUsable(const QByteArray &peerId) const
+{
+    if (!m_usersSeparate)
+        return true;
+    const TrustedPeer *trusted = m_store.find(peerId);
+    return trusted && !m_localUser.isEmpty() && trusted->owner == m_localUser;
+}
+
+void Node::adoptUnownedPeers()
+{
+    // Pairings made before they were tied to users belong to the first user seen.
+    if (m_localUser.isEmpty())
+        return;
+    for (const TrustedPeer &t : m_store.all()) {
+        if (t.owner.isEmpty())
+            m_store.setOwner(t.id, m_localUser);
+    }
+}
+
+void Node::setLocalUser(const QString &user)
+{
+    if (m_usersSeparate && m_localUser == user)
+        return;
+    m_usersSeparate = true;
+    m_localUser = user;
+    adoptUnownedPeers();
+    for (auto &[id, peer] : m_peers) {
+        if (m_store.contains(id) && !isUsable(id)) {
+            if (peer->connected)
+                qCInfo(lcNode) << "Disconnecting from" << peer->name << "(paired by another user)";
+            dropSessions(*peer);
+        }
+    }
+    emit peersChanged();
+}
 
 QByteArray Node::beaconPacket(bool query) const
 {
@@ -797,6 +918,11 @@ void Node::onTick()
     bool listChanged = false;
     for (auto it = m_peers.begin(); it != m_peers.end();) {
         Peer &p = *it->second;
+        if (m_store.contains(p.id) && !isUsable(p.id)) { // another user's: kept, idle
+            dropSessions(p);
+            ++it;
+            continue;
+        }
         if (!m_store.contains(p.id)) {
             dropSessions(p);
             if (p.lastSeen < 0 || now - p.lastSeen > kUntrustedExpiryMs * 4) {

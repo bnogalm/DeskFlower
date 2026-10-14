@@ -8,6 +8,12 @@
 //
 // Wire: [length u32 big-endian][bytes]. The first frame each way is a Noise handshake message,
 // then frames are AEAD ciphertexts of at most kMaxFrame plaintext bytes.
+//
+// Noise IK message 1 can be replayed by anyone who recorded it, and it authenticates the initiator
+// only once its first encrypted frame decrypts. So the accepting side reports `established` only
+// then (every protocol on these streams starts with a request from the side that connects), and
+// until then the connection counts as unauthenticated (handshake timeout). Streams quiet in both
+// directions for kIdleTimeoutMs are closed.
 
 #include "crypto.h"
 #include "noise.h"
@@ -28,6 +34,7 @@ class SecureStream : public QObject
 public:
     static constexpr int kMaxFrame = 64 * 1024;
     static constexpr int kHandshakeTimeoutMs = 10000;
+    static constexpr int kIdleTimeoutMs = 5 * 60 * 1000;
 
     // Returns the peer id when the remote static key belongs to a trusted device.
     using TrustCheck = std::function<std::optional<QByteArray>(const QByteArray &remoteStatic)>;
@@ -58,7 +65,7 @@ signals:
     void closed(const QString &reason);
 
 private:
-    enum class State { Connecting, AwaitingResponse, AwaitingInit, Established, Closing, Closed };
+    enum class State { Connecting, AwaitingResponse, AwaitingInit, AwaitingFirstFrame, Established, Closing, Closed };
 
     SecureStream(QTcpSocket *socket, const crypto::KeyPair &local, QObject *parent);
     void onConnected();
@@ -79,6 +86,7 @@ private:
     quint64 m_recvCounter = 0;
     QByteArray m_buffer;
     QTimer m_handshakeTimer;
+    QTimer m_idleTimer;
 };
 
 } // namespace df

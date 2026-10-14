@@ -92,7 +92,8 @@ int main(int argc, char *argv[])
             share->setEnabled(backend.serviceConnected());
         });
         menu.addSeparator();
-        menu.addAction(QObject::tr("Quit"), &app, &QCoreApplication::quit);
+        // Quitting stops DeskFlower altogether (the service too), until it is opened again.
+        menu.addAction(QObject::tr("Quit DeskFlower"), &backend, &Backend::stopServiceAndQuit);
         trayIcon.setContextMenu(&menu);
         QObject::connect(&trayIcon, &QSystemTrayIcon::activated, &app, [&engine](QSystemTrayIcon::ActivationReason r) {
             if (r == QSystemTrayIcon::Trigger || r == QSystemTrayIcon::DoubleClick)

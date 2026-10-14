@@ -35,10 +35,14 @@ struct TrustedPeer {
     QString name;
     QDateTime pairedAt;
     bool allowView = false; // this device may show its screen to the peer without asking
+    // Who paired it, when a device has several users (the Windows service: the console user's SID).
+    // The peer only works while that user is signed in on this device. Empty: anyone (or not yet
+    // known, for pairings made before this was recorded).
+    QString owner;
 };
 
 // Peers accepted through PIN pairing, persisted in <configDir>/peers.json as an array of
-// {publicKey, name, pairedAt, allowView (only when true)}. Unpairing deletes the record and
+// {publicKey, name, pairedAt, allowView (only when true), owner (when known)}. Unpairing deletes the record and
 // re-pairing replaces it, so a screen view grant never outlives the pairing.
 class PeerStore
 {
@@ -50,6 +54,7 @@ public:
     void remove(const QByteArray &id);
     void rename(const QByteArray &id, const QString &name);
     void setAllowView(const QByteArray &id, bool on);
+    void setOwner(const QByteArray &id, const QString &owner);
     QList<TrustedPeer> all() const { return m_peers.values(); }
 
 private:

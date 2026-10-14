@@ -22,6 +22,7 @@ class Backend : public QObject
     QML_UNCREATABLE("Provided by the application")
 
     Q_PROPERTY(bool serviceConnected READ serviceConnected NOTIFY serviceConnectedChanged)
+    Q_PROPERTY(QString serviceStartError READ serviceStartError NOTIFY serviceStartErrorChanged)
     Q_PROPERTY(QString selfId READ selfId NOTIFY stateChanged)
     Q_PROPERTY(QString selfName READ selfName NOTIFY stateChanged)
     Q_PROPERTY(QString fingerprint READ fingerprint NOTIFY stateChanged)
@@ -62,6 +63,7 @@ public:
     Backend(const QString &instance, ThumbnailProvider *thumbnails, QObject *parent = nullptr);
 
     bool serviceConnected() const { return m_socket.state() == QLocalSocket::ConnectedState; }
+    QString serviceStartError() const { return m_serviceStartError; }
     QString selfId() const { return m_selfId; }
     QString selfName() const { return m_selfName; }
     QString fingerprint() const { return m_fingerprint; }
@@ -94,6 +96,10 @@ public:
     QString updatePeerId() const { return m_updates.value(QStringLiteral("peer")).toString(); }
     double updateProgress() const;
 
+    // Quitting from the tray stops the service too (and with it every connection), until the
+    // agent starts it again: at its next launch, or with startService (the banner's button).
+    Q_INVOKABLE void stopServiceAndQuit();
+    Q_INVOKABLE void startService();
     Q_INVOKABLE void setExploring(bool on);
     Q_INVOKABLE void pair(const QString &peerId);
     Q_INVOKABLE void submitPin(const QString &peerId, const QString &pin);
@@ -127,6 +133,7 @@ public:
 
 signals:
     void serviceConnectedChanged();
+    void serviceStartErrorChanged();
     void stateChanged();
     void pinShown(const QString &peerId, const QString &peerName, const QString &pin);
     void pinRequested(const QString &peerId, const QString &peerName);
@@ -146,7 +153,12 @@ private:
     void command(const QString &cmd, QCborMap args = {});
     static QString thumbKey(const QString &deviceId, const QString &screenId);
 
+    void setServiceStartError(const QString &error);
+
+    QString m_instance;
     QString m_serverName;
+    QString m_serviceStartError;
+    bool m_triedStart = false;
     QLocalSocket m_socket;
     df::ipc::Connection m_conn;
     QTimer m_reconnect;

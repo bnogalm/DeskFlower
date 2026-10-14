@@ -30,6 +30,7 @@ void ReliableChannel::reset()
     m_expected = 0;
     m_outOfOrder.clear();
     m_partial.clear();
+    m_oversized = false;
 }
 
 void ReliableChannel::send(const QByteArray &message, qint64 nowMs)
@@ -174,10 +175,17 @@ QList<QByteArray> ReliableChannel::receive(const QByteArray &packet, qint64 nowM
 
     for (auto it = m_outOfOrder.find(m_expected); it != m_outOfOrder.end(); it = m_outOfOrder.find(m_expected)) {
         const quint8 flags = quint8(it->second[0]);
-        m_partial.append(it->second.constData() + 1, it->second.size() - 1);
-        if (!(flags & kMoreFragments)) {
-            delivered.append(m_partial);
+        if (!m_oversized && m_partial.size() + it->second.size() - 1 > kMaxMessage) {
+            m_oversized = true;
             m_partial.clear();
+        }
+        if (!m_oversized)
+            m_partial.append(it->second.constData() + 1, it->second.size() - 1);
+        if (!(flags & kMoreFragments)) {
+            if (!m_oversized)
+                delivered.append(m_partial);
+            m_partial.clear();
+            m_oversized = false;
         }
         m_outOfOrder.erase(it);
         ++m_expected;

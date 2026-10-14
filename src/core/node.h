@@ -11,6 +11,7 @@
 #include "store.h"
 
 #include <QCborMap>
+#include <QHash>
 #include <QHostAddress>
 #include <QObject>
 #include <QTcpServer>
@@ -32,6 +33,7 @@ struct PeerView {
     bool connected = false;
     bool exploring = false;
     bool allowView = false; // trusted peer may view this screen without asking
+    bool otherUser = false; // paired by another user of this device: unusable now (Node::setLocalUser)
     // From the authenticated hello (connected trusted peers only).
     QString version;        // Deskflower version it runs
     QString platform;       // build::platform()
@@ -69,6 +71,12 @@ public:
     QList<PeerView> peers() const;
     bool isConnected(const QByteArray &peerId) const;
     bool isTrusted(const QByteArray &peerId) const { return m_store.contains(peerId); }
+
+    // Devices with several users (the Windows service): a pairing belongs to the user signed in
+    // when it was made, and the peer is only reachable (sessions, messages, streams) while that
+    // user is the one signed in here. `user` identifies who is signed in now (empty: nobody).
+    // Never called: pairings are not tied to users (the node runs as one user).
+    void setLocalUser(const QString &user);
 
     // Local grant letting a trusted peer view this screen without a prompt (persisted).
     bool isViewAllowed(const QByteArray &peerId) const;
@@ -146,6 +154,28 @@ private:
     std::unique_ptr<PairingManager> m_pairing;
     std::map<QByteArray, std::unique_ptr<Peer>> m_peers;
     std::map<quint32, QByteArray> m_indexToPeer;
+    // Pairings tied to users (setLocalUser).
+    bool isUsable(const QByteArray &peerId) const;
+    void adoptUnownedPeers();
+
+    // Unauthenticated traffic is rate limited, so that a flood costs little CPU and memory.
+    struct RateLimit {
+        double perSecond;
+        double burst;
+        double tokens;
+        qint64 last = 0;
+        RateLimit(double perSecond, double burst) : perSecond(perSecond), burst(burst), tokens(burst) {}
+        bool take(qint64 nowMs);
+    };
+    RateLimit m_beaconLimit;
+    RateLimit m_handshakeLimit;
+    RateLimit m_pairingLimit;
+    QHash<std::pair<QHostAddress, quint16>, qint64> m_queryAnswered; // beacon queries answered, by sender
+    int m_pendingStreams = 0;                        // accepted TCP connections not authenticated yet
+    std::map<QByteArray, int> m_acceptedStreams;     // authenticated, by peer
+
+    bool m_usersSeparate = false;
+    QString m_localUser;
     QByteArray m_bootId;
     bool m_exploring = false;
     qint64 m_explorationStarted = 0;

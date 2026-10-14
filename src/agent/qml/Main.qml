@@ -108,11 +108,21 @@ ApplicationWindow {
             visible: !window.backend.serviceConnected
             Layout.fillWidth: true
             Material.background: Material.color(Material.Orange, Material.Shade100)
-            Label {
+            RowLayout {
                 anchors.fill: parent
-                wrapMode: Text.WordWrap
-                color: "#5d3a00"
-                text: qsTr("The DeskFlower service is not running. Retrying…")
+                spacing: 12
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: "#5d3a00"
+                    text: window.backend.serviceStartError
+                          ? qsTr("The DeskFlower service is not running: %1.").arg(window.backend.serviceStartError)
+                          : qsTr("The DeskFlower service is not running.")
+                }
+                Button {
+                    text: qsTr("Start")
+                    onClicked: window.backend.startService()
+                }
             }
         }
 

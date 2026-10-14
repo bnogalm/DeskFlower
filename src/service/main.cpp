@@ -17,6 +17,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QTimer>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -103,6 +104,18 @@ int runNode(int argc, char **argv, bool serviceMode)
     if (!node.start(&error)) {
         qCritical().noquote() << error;
         return 1;
+    }
+    // Each pairing works only while the user who made it is signed in at the console (also on
+    // their lock screen, not on the sign-in screen or in another user's session).
+    QTimer userWatch;
+    if (df::platform::separatesUsers(serviceMode)) {
+        auto followUser = [&node, serviceMode] { node.setLocalUser(df::platform::interactiveUserId(serviceMode)); };
+        followUser();
+        QObject::connect(df::platform::SessionEvents::instance(), &df::platform::SessionEvents::sessionChanged,
+                         &node, followUser);
+        userWatch.setInterval(2000); // session notifications can be missed
+        QObject::connect(&userWatch, &QTimer::timeout, &node, followUser);
+        userWatch.start();
     }
     df::Workspace workspace(&node, configDir);
     df::InputController input(&node, &workspace);

@@ -99,6 +99,7 @@ bool PeerStore::load(const QString &configDir)
         p.name = o.value(QStringLiteral("name")).toString();
         p.pairedAt = QDateTime::fromString(o.value(QStringLiteral("pairedAt")).toString(), Qt::ISODate);
         p.allowView = o.value(QStringLiteral("allowView")).toBool();
+        p.owner = o.value(QStringLiteral("owner")).toString();
         m_peers.insert(p.id, p);
     }
     return true;
@@ -140,6 +141,15 @@ void PeerStore::setAllowView(const QByteArray &id, bool on)
     }
 }
 
+void PeerStore::setOwner(const QByteArray &id, const QString &owner)
+{
+    auto it = m_peers.find(id);
+    if (it != m_peers.end() && it->owner != owner) {
+        it->owner = owner;
+        save();
+    }
+}
+
 bool PeerStore::save() const
 {
     QJsonArray arr;
@@ -150,6 +160,8 @@ bool PeerStore::save() const
         o.insert(QStringLiteral("pairedAt"), p.pairedAt.toString(Qt::ISODate));
         if (p.allowView)
             o.insert(QStringLiteral("allowView"), true);
+        if (!p.owner.isEmpty())
+            o.insert(QStringLiteral("owner"), p.owner);
         arr.append(o);
     }
     return writeJson(m_path, QJsonDocument(arr));

@@ -50,6 +50,27 @@ The session helper authenticates to the service with a secret passed in its envi
   frames with per-direction counters. Only trusted devices are accepted, in both directions.
   TCP uses the UDP port number when it is free, otherwise any port, announced in beacons and in
   the authenticated `hello`.
+  - A recorded first handshake message can be replayed by anyone, so the accepting side trusts a
+    stream only once the first encrypted frame from the other side decrypts; until then it counts
+    as unauthenticated (10 s handshake timeout).
+- **Pairings belong to a user:** the Windows service serves every user of the computer, so a
+  pairing is recorded with the SID of the user signed in at the console when it was made, and the
+  peer is reachable (sessions, messages, streams, input) only while that user is the one signed in
+  there, their lock screen included. On the sign-in screen, or in another user's session, the peer
+  is not answered and does not appear in the agent. Pairings made before 0.1.16 go to the first
+  user seen. Linux and macOS run one service per user, so this does not apply there.
+- **Unauthenticated traffic is bounded**, so that flooding the LAN costs little:
+  - Rate limits on beacons, handshake initiations (two key exchanges each before the sender is
+    known) and pairing packets; a beacon query is answered at most twice a second per sender, so
+    forged source addresses cannot turn a device into a reflector.
+  - At most 64 unknown devices are kept from beacons. Beacons never rename a paired device (its
+    name comes from the authenticated `hello`).
+  - At most 16 TCP connections waiting to authenticate, 32 streams per paired device, and streams
+    quiet in both directions for 5 minutes are closed. Reliable messages larger than 8 MB are
+    dropped (bulk data travels over TCP).
+  - Phone access: request headers must arrive within 15 s, at most 16 connections per address
+    (64 in total) and 16 TLS handshakes at once, and a request body is read only when the request
+    carries a valid session.
 
 - **Updates from paired devices:** Ed25519-signed manifests checked against a public key compiled
   into the build (see [Signed updates](#signed-updates-from-paired-devices)).
@@ -347,7 +368,11 @@ The Windows MSI (per-machine):
   its paired devices ([Signed updates](#signed-updates-from-paired-devices)).
 
 The agent lives in the system tray: closing its window hides it. The tray menu has *Open*,
-*Share this keyboard and mouse* and *Quit*.
+*Share this keyboard and mouse* and *Quit DeskFlower*. Quitting stops the service too (every
+connection, phone access, the session helper) until DeskFlower is opened again (the agent starts
+the service when it finds it stopped) or the computer restarts. While the service is not running
+the window shows a *Start* button. Signed-in users may start the service (not stop it): `--install`
+adds that right to the service's permissions.
 
 The DEB enables the `systemd --user` service for every user and starts the agent at logon (XDG
 autostart). On macOS, copy the bundles and run `deskflower-service --install` once to register

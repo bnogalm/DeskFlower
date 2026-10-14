@@ -223,6 +223,8 @@ bool PhoneServer::start(QString *error)
     tls.setPeerVerifyMode(QSslSocket::VerifyNone);
 
     auto http = std::make_unique<HttpServer>([this](const HttpRequest &r) { return handle(r); }, kMaxChunk);
+    // Only signed-in phones may send bodies (uploads, text).
+    http->setBodyGate([this](const HttpRequest &r) { return authorized(r); });
     QString listenError;
     if (!http->listen(tls, QHostAddress::AnyIPv4, m_options.port, &listenError)) {
         *error = QStringLiteral("Cannot listen on HTTPS port %1: %2").arg(m_options.port).arg(listenError);

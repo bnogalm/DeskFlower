@@ -14,8 +14,16 @@
 #include <QImage>
 #include <QImageReader>
 #include <QLocalSocket>
+#include <QProcess>
 #include <QVariantMap>
 #include <QtEndian>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <winsvc.h>
+#elif defined(Q_OS_MACOS)
+#include <unistd.h>
+#endif
 
 namespace {
 // Thumbnails are captured at most 480x300; anything far larger is refused undecoded.
@@ -23,15 +31,29 @@ constexpr int kMaxThumbnailSide = 1024;
 } // namespace
 
 Backend::Backend(const QString &instance, ThumbnailProvider *thumbnails, QObject *parent)
-    : QObject(parent), m_serverName(df::ipc::serverName(instance)), m_conn(&m_socket), m_thumbnails(thumbnails)
+    : QObject(parent),
+      m_instance(instance),
+      m_serverName(df::ipc::serverName(instance)),
+      m_conn(&m_socket),
+      m_thumbnails(thumbnails)
 {
     connect(&m_conn, &df::ipc::Connection::messageReceived, this, &Backend::onMessage);
-    connect(&m_socket, &QLocalSocket::connected, this, &Backend::serviceConnectedChanged);
+    connect(&m_socket, &QLocalSocket::connected, this, [this] {
+        setServiceStartError({});
+        emit serviceConnectedChanged();
+    });
     connect(&m_socket, &QLocalSocket::disconnected, this, [this] {
         emit serviceConnectedChanged();
         m_reconnect.start();
     });
-    connect(&m_socket, &QLocalSocket::errorOccurred, this, [this] { m_reconnect.start(); });
+    connect(&m_socket, &QLocalSocket::errorOccurred, this, [this] {
+        // Launching the agent starts a service that the user stopped (by quitting) last time.
+        if (!m_triedStart && m_socket.error() == QLocalSocket::ServerNotFoundError) {
+            m_triedStart = true;
+            startService();
+        }
+        m_reconnect.start();
+    });
 
     m_reconnect.setInterval(1000);
     m_reconnect.setSingleShot(true);
@@ -225,6 +247,57 @@ void Backend::setLayout(const QVariantList &packs)
 }
 
 void Backend::refreshThumbnails() { command(QStringLiteral("requestThumbs")); }
+
+void Backend::stopServiceAndQuit()
+{
+    if (serviceConnected()) {
+        command(QStringLiteral("stopService"));
+        m_socket.flush();
+        m_socket.waitForBytesWritten(1000);
+    }
+    QCoreApplication::quit();
+}
+
+void Backend::setServiceStartError(const QString &error)
+{
+    if (m_serviceStartError == error)
+        return;
+    m_serviceStartError = error;
+    emit serviceStartErrorChanged();
+}
+
+void Backend::startService()
+{
+    setServiceStartError({});
+    if (!m_instance.isEmpty()) {
+        setServiceStartError(tr("Start the service of instance \"%1\" by hand").arg(m_instance));
+        return;
+    }
+#ifdef Q_OS_WIN
+    // Signed-in users may start (not stop) the service: see platform::install.
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    SC_HANDLE service = scm ? OpenServiceW(scm, L"Deskflower", SERVICE_START | SERVICE_QUERY_STATUS) : nullptr;
+    const bool ok = service && (StartServiceW(service, 0, nullptr) || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING);
+    const DWORD error = GetLastError();
+    if (service)
+        CloseServiceHandle(service);
+    if (scm)
+        CloseServiceHandle(scm);
+    if (!ok)
+        setServiceStartError(error == ERROR_ACCESS_DENIED
+                                 ? tr("Windows did not let this user start the service (reinstalling DeskFlower "
+                                      "fixes it, or start \"DeskFlower\" in Services)")
+                                 : tr("The service could not be started (error %1)").arg(error));
+#elif defined(Q_OS_MACOS)
+    QProcess::startDetached(QStringLiteral("launchctl"),
+                            {QStringLiteral("kickstart"),
+                             QStringLiteral("gui/%1/com.deskflower.service").arg(::getuid())});
+#else
+    QProcess::startDetached(QStringLiteral("systemctl"),
+                            {QStringLiteral("--user"), QStringLiteral("start"), QStringLiteral("deskflower.service")});
+#endif
+    m_reconnect.start(); // connects as soon as it listens
+}
 
 void Backend::connectToService()
 {

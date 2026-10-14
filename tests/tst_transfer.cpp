@@ -9,7 +9,9 @@
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTemporaryDir>
+#include <QTcpSocket>
 #include <QTest>
+#include <QtEndian>
 
 using namespace df;
 
@@ -71,14 +73,17 @@ private slots:
         QVERIFY(client);
         QSignalSpy established(client.get(), &SecureStream::established);
         QTRY_COMPARE(established.size(), 1);
-        QTRY_VERIFY(accepted);
-        QCOMPARE(accepted->peerId(), a->id());
+        // The accepting side trusts the stream only once a frame from the client decrypts.
+        QTest::qWait(100);
+        QVERIFY(!accepted);
 
         // 8 MB in 64 KB frames arrives intact and in order.
         const QByteArray payload = randomBytes(8 * 1024 * 1024, 7);
         for (int off = 0; off < payload.size(); off += SecureStream::kMaxFrame)
             QVERIFY(client->send(payload.mid(off, SecureStream::kMaxFrame)));
         QVERIFY(!client->send(QByteArray(SecureStream::kMaxFrame + 1, 'x')));
+        QTRY_VERIFY(accepted);
+        QCOMPARE(accepted->peerId(), a->id());
         QTRY_COMPARE_WITH_TIMEOUT(got.size(), payload.size() / SecureStream::kMaxFrame, 20000);
         QCOMPARE(got.join(), payload);
     }
@@ -115,6 +120,44 @@ private slots:
         QVERIFY(!attempt(other, server.publicKey));   // client the server does not trust
         QVERIFY(!attempt(client, other.publicKey));   // server is not who the client expects
         qDeleteAll(serverSide);
+    }
+
+    void replayedHandshakeIsNotAccepted()
+    {
+        QVERIFY(crypto::init());
+        const crypto::KeyPair server = crypto::generateKeyPair();
+        const crypto::KeyPair client = crypto::generateKeyPair();
+        QTcpServer listener;
+        QVERIFY(listener.listen(QHostAddress::LocalHost));
+        SecureStream *serverSide = nullptr;
+        connect(&listener, &QTcpServer::newConnection, this, [&] {
+            auto trust = [&](const QByteArray &key) -> std::optional<QByteArray> {
+                return key == client.publicKey ? std::optional<QByteArray>("peer") : std::nullopt;
+            };
+            serverSide = SecureStream::accept(listener.nextPendingConnection(), server, trust, this);
+        });
+
+        // A recorded first handshake message from the trusted client, sent again by someone
+        // without its keys: the server answers, but nothing that follows can decrypt.
+        noise::IKInitiator initiator(client, server.publicKey, QByteArray("deskflower/tcp/1"));
+        const QByteArray message1 = initiator.writeMessage1({});
+        auto framed = [](const QByteArray &frame) {
+            char len[4];
+            qToBigEndian<quint32>(quint32(frame.size()), len);
+            return QByteArray(len, 4) + frame;
+        };
+        QTcpSocket replay;
+        replay.connectToHost(QHostAddress::LocalHost, listener.serverPort());
+        QVERIFY(replay.waitForConnected(5000));
+        replay.write(framed(message1));
+        QTRY_VERIFY(serverSide);
+        QSignalSpy established(serverSide, &SecureStream::established);
+        QSignalSpy closed(serverSide, &SecureStream::closed);
+        QTRY_VERIFY(replay.bytesAvailable() > 0); // message 2
+        replay.write(framed(QByteArray(64, 'x')));
+        QTRY_COMPARE(closed.size(), 1);
+        QCOMPARE(established.size(), 0);
+        delete serverSide;
     }
 
     void fetchFilesFoldersAndBlobs()

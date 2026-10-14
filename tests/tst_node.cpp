@@ -3,11 +3,18 @@
 
 #include "node.h"
 #include "pairing.h"
+#include "testutil.h"
+#include "wire.h"
 
+#include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QUdpSocket>
 
 using namespace df;
 
@@ -185,6 +192,98 @@ private slots:
         QVERIFY(a->requestPairing(b->id()));
         QTRY_COMPARE(finishedA.size(), 1);
         QVERIFY(!finishedA.first().at(1).toBool());
+    }
+
+    void pairingsBelongToTheUserWhoMadeThem()
+    {
+        QTemporaryDir dirA, dirB;
+        auto a = makeNode(dirA.path());
+        auto b = makeNode(dirB.path());
+        a->setLocalUser(QStringLiteral("alice"));
+        QVERIFY(test::pairNodes(*a, *b));
+
+        // Another user signs in on A: B is out of reach, and not theirs to see, use or remove.
+        a->setLocalUser(QStringLiteral("bob"));
+        QVERIFY(!a->isConnected(b->id()));
+        QVERIFY(!a->sendMessage(b->id(), QCborMap{{QStringLiteral("t"), QStringLiteral("x")}}));
+        QVERIFY(!a->openStream(b->id()));
+        bool otherUser = false;
+        for (const PeerView &p : a->peers())
+            otherUser |= p.id == b->id() && p.otherUser;
+        QVERIFY(otherUser);
+        a->unpair(b->id());
+        QVERIFY(a->isTrusted(b->id()));
+        QTest::qWait(1500); // B keeps trying: A does not answer
+        QVERIFY(!a->isConnected(b->id()));
+
+        // Back to the user who paired them: they reconnect.
+        a->setLocalUser(QStringLiteral("alice"));
+        QTRY_VERIFY_WITH_TIMEOUT(a->isConnected(b->id()) && b->isConnected(a->id()), 10000);
+
+        // Nobody signed in (the sign-in screen): nothing either.
+        a->setLocalUser(QString());
+        QVERIFY(!a->isConnected(b->id()));
+
+        // Pairings made before users were told apart go to the first user seen.
+        QTemporaryDir dirC, dirD;
+        auto c = makeNode(dirC.path());
+        auto d = makeNode(dirD.path());
+        QVERIFY(test::pairNodes(*c, *d));
+        c->setLocalUser(QStringLiteral("carol"));
+        QVERIFY(c->isConnected(d->id()));
+        c->setLocalUser(QStringLiteral("dave"));
+        QVERIFY(!c->isConnected(d->id()));
+    }
+
+    void beaconsCannotRenameOrFloodPeers()
+    {
+        QTemporaryDir dirA, dirB;
+        auto a = makeNode(dirA.path());
+        auto b = makeNode(dirB.path());
+        QVERIFY(test::pairNodes(*a, *b));
+        auto nameOf = [&](const QByteArray &id) {
+            for (const PeerView &p : a->peers()) {
+                if (p.id == id)
+                    return p.name;
+            }
+            return QString();
+        };
+        const QString name = nameOf(b->id());
+        QVERIFY(!name.isEmpty());
+
+        auto beacon = [](const QByteArray &id, const QByteArray &key, const QString &name) {
+            QCborMap m;
+            m.insert(QStringLiteral("i"), id);
+            m.insert(QStringLiteral("n"), name);
+            m.insert(QStringLiteral("k"), key);
+            m.insert(QStringLiteral("o"), QStringLiteral("windows"));
+            return wire::cborPacket(wire::Type::Beacon, m);
+        };
+        QUdpSocket attacker;
+        QVERIFY(attacker.bind(QHostAddress::LocalHost, 0));
+        // An unauthenticated beacon with B's identity and another name.
+        QByteArray bKey;
+        {
+            QFile f(QDir(dirB.path()).filePath(QStringLiteral("identity.json")));
+            QVERIFY(f.open(QIODevice::ReadOnly));
+            bKey = crypto::publicKeyFromSecret(QByteArray::fromBase64(
+                QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("secretKey")).toString().toLatin1()));
+        }
+        QCOMPARE(crypto::deviceIdFromPublicKey(bKey), b->id());
+        attacker.writeDatagram(beacon(b->id(), bKey, QStringLiteral("Evil")), QHostAddress::LocalHost, a->dataPort());
+        QTest::qWait(300);
+        QCOMPARE(nameOf(b->id()), name);
+
+        // Hundreds of made-up devices: only a bounded number is kept.
+        for (int i = 0; i < 300; ++i) {
+            const crypto::KeyPair k = crypto::generateKeyPair();
+            attacker.writeDatagram(beacon(crypto::deviceIdFromPublicKey(k.publicKey), k.publicKey,
+                                          QStringLiteral("fake %1").arg(i)),
+                                   QHostAddress::LocalHost, a->dataPort());
+        }
+        QTest::qWait(500);
+        QVERIFY2(a->peers().size() <= 65, qPrintable(QString::number(a->peers().size())));
+        QVERIFY(a->isConnected(b->id()));
     }
 };
 

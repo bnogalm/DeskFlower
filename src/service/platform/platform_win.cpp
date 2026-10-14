@@ -19,6 +19,7 @@
 #include <wtsapi32.h>
 
 #include <atomic>
+#include <vector>
 
 Q_LOGGING_CATEGORY(lcPlatform, "deskflower.platform")
 
@@ -237,6 +238,19 @@ int install(QString *message)
     SERVICE_DESCRIPTIONW description = {const_cast<wchar_t *>(kDescription)};
     ChangeServiceConfig2W(service, SERVICE_CONFIG_DESCRIPTION, &description);
 
+    // The default service permissions, plus starting it for signed-in users: the agent starts the
+    // service again after the user quit DeskFlower from the tray (which stops it). Stopping stays
+    // with administrators, and with the agent of the console session through the service's pipe.
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)"
+            L"(A;;CCLCSWLOCRRC;;;SU)",
+            SDDL_REVISION_1, &sd, nullptr)) {
+        if (!SetServiceObjectSecurity(service, DACL_SECURITY_INFORMATION, sd))
+            qCWarning(lcPlatform) << "Cannot let users start the service:" << lastErrorString();
+        LocalFree(sd);
+    }
+
     SC_ACTION actions[3] = {{SC_ACTION_RESTART, 3000}, {SC_ACTION_RESTART, 10000}, {SC_ACTION_RESTART, 30000}};
     SERVICE_FAILURE_ACTIONSW failure = {};
     failure.dwResetPeriod = 24 * 3600;
@@ -397,6 +411,30 @@ QString interactiveUserHome(bool serviceMode)
     const BOOL ok = GetUserProfileDirectoryW(token, path, &size);
     CloseHandle(token);
     return ok ? QDir::fromNativeSeparators(QString::fromWCharArray(path)) : QString();
+}
+
+bool separatesUsers(bool serviceMode) { return serviceMode; }
+
+QString interactiveUserId(bool serviceMode)
+{
+    if (!serviceMode)
+        return {};
+    HANDLE token = nullptr;
+    if (!WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token))
+        return {};
+    QString sid;
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<char> buffer(size);
+    if (size && GetTokenInformation(token, TokenUser, buffer.data(), size, &size)) {
+        LPWSTR text = nullptr;
+        if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER *>(buffer.data())->User.Sid, &text)) {
+            sid = QString::fromWCharArray(text);
+            LocalFree(text);
+        }
+    }
+    CloseHandle(token);
+    return sid;
 }
 
 std::shared_ptr<void> actAsInteractiveUser(bool serviceMode)
