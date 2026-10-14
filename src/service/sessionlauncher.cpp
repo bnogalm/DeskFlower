@@ -142,11 +142,13 @@ void SessionLauncher::launch()
 
 void SessionLauncher::stopNative()
 {
+#ifdef Q_OS_WIN
     if (m_notifier) {
         m_notifier->setEnabled(false);
         m_notifier->deleteLater();
         m_notifier = nullptr;
     }
+#endif
     platform::terminateSessionProcess(&m_native);
 }
 
