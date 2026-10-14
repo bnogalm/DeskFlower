@@ -143,11 +143,13 @@ private slots:
         QTRY_VERIFY(knows(*a, b->id()));
 
         QSignalSpy pinShown(b.get(), &Node::pairingPinGenerated);
+        QSignalSpy pinAsked(a.get(), &Node::pairingPinRequired);
         QSignalSpy finishedA(a.get(), &Node::pairingFinished);
         QSignalSpy finishedB(b.get(), &Node::pairingFinished);
         for (int attempt = 1; attempt <= PairingManager::kMaxFailedAttempts; ++attempt) {
             QVERIFY(a->requestPairing(b->id()));
             QTRY_COMPARE(pinShown.size(), attempt);
+            QTRY_COMPARE(pinAsked.size(), attempt); // A got the challenge and waits for the PIN
             const QString pin = pinShown.last().at(2).toString();
             const QString wrong = QStringLiteral("%1").arg((pin.toInt() + 1) % 1000000, 6, 10, QLatin1Char('0'));
             QElapsedTimer answer;
