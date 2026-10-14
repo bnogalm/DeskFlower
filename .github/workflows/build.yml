@@ -1,6 +1,7 @@
 # Builds DeskFlower on Linux and macOS, runs the tests and packages it (DEB and DMG, kept as
-# artifacts of the run). Windows is built locally with scripts\build-windows.bat and
-# scripts\package-windows.bat (the MSI is signed with the update key, which stays off GitHub).
+# artifacts of the run). A v* tag also publishes them in the release of that tag. Windows is built
+# locally with scripts\build-windows.bat and scripts\package-windows.bat (the MSI is signed with
+# the update key, which stays off GitHub) and uploaded to the same release by hand.
 name: build
 
 on:
@@ -92,3 +93,24 @@ jobs:
           name: deskflower-macos-arm64
           path: build/*.dmg
           if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --title "DeskFlower ${TAG#v}" --generate-notes
+          gh release upload "$TAG" packages/* --clobber
