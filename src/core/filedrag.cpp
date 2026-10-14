@@ -2,6 +2,7 @@
 
 #include "filetransfer.h"
 #include "inputcontroller.h"
+#include "fsutil.h"
 #include "node.h"
 #include "workspace.h"
 
@@ -94,7 +95,7 @@ void FileDrag::pruneDownloads(const QString &dir) const
     QDir d(dir);
     QStringList entries = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Time | QDir::Reversed);
     while (entries.size() > kKeptDownloads)
-        QDir(d.filePath(entries.takeFirst())).removeRecursively();
+        fs::removeTree(d.filePath(entries.takeFirst()));
 }
 
 // --- Master side ---------------------------------------------------------------------------------
@@ -420,7 +421,7 @@ void FileDrag::dropHere(const QByteArray &source, quint64 offer, int count, qint
         emit notice(tr("Receiving %n file(s) from %1…", nullptr, count).arg(peerName(source)), false);
         m_transfer->fetch(source, offer, staging, true, bytes, [=, this](const FetchResult &result) {
             if (!result.ok) {
-                QDir(staging).removeRecursively();
+                fs::removeTree(staging);
                 emit notice(tr("Could not receive the files from %1: %2").arg(peerName(source), result.error), true);
                 reportTo(source, offer, false, result.error);
                 return;
@@ -431,7 +432,7 @@ void FileDrag::dropHere(const QByteArray &source, quint64 offer, int count, qint
                 if (QFile::rename(item, to) || QDir().rename(item, to))
                     ++placed;
             }
-            QDir(staging).removeRecursively();
+            fs::removeTree(staging);
             if (placed != result.files.size()) {
                 reportTo(source, offer, false, tr("Could not put every file in %1").arg(QDir::toNativeSeparators(folder)));
                 return;

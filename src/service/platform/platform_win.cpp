@@ -399,6 +399,25 @@ QString interactiveUserHome(bool serviceMode)
     return ok ? QDir::fromNativeSeparators(QString::fromWCharArray(path)) : QString();
 }
 
+std::shared_ptr<void> actAsInteractiveUser(bool serviceMode)
+{
+    if (!serviceMode)
+        return std::make_shared<int>(0);
+    HANDLE token = nullptr;
+    if (!WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token))
+        return nullptr;
+    const BOOL ok = ImpersonateLoggedOnUser(token);
+    CloseHandle(token); // the thread keeps its own impersonation token
+    if (!ok) {
+        qCWarning(lcPlatform) << "Cannot act as the signed-in user:" << lastErrorString();
+        return nullptr;
+    }
+    return std::shared_ptr<void>(new int(0), [](void *p) {
+        RevertToSelf();
+        delete static_cast<int *>(p);
+    });
+}
+
 bool canInstallPackages(bool serviceMode) { return serviceMode; }
 
 bool launchPackageInstaller(const QString &package, const QString &logPath,

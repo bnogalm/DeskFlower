@@ -68,6 +68,9 @@ public:
     QByteArray activeDevice() const { return m_active; }
     QPoint cursor() const { return m_cursor; }
     bool isViewing() const { return m_viewing; }
+    // The cursor is on this device (master: input is local; slave: the master's cursor is here,
+    // or nobody drives it), or left it less than graceMs ago.
+    bool cursorHere(qint64 graceMs) const;
 
     // Remote view, master side: the device accepted (input may flow) / the view failed (go home).
     void setViewAccepted(const QByteArray &device);
@@ -86,6 +89,9 @@ public:
 signals:
     void toSession(const QCborMap &msg);
     void activeDeviceChanged(const QByteArray &deviceId);
+    // Master side: the cursor went from one device to another (either may be this one). Not for a
+    // remote view until the device accepts it.
+    void cursorMoved(const QByteArray &from, const QByteArray &to);
     // Remote view: the service should stream the device's screen (sized for `monitor`) / stop.
     void viewRequested(const QByteArray &deviceId, QSize monitor, const QRect &remoteScreen);
     // Remote view: show this other screen of the device (its native coordinates).
@@ -155,6 +161,12 @@ private:
     QTimer m_catchTimer;
     bool m_dragging = false;
     QByteArray m_dragSource;
+
+    QByteArray m_cursorFrom; // device the cursor came from (for a remote view accepted later)
+
+    // Both sides: whether the cursor is away from this device, and since when.
+    bool m_cursorAway = false;
+    qint64 m_cursorLeftAt = 0;
 
     // Slave side.
     quint32 m_lastMotionSeq = 0;

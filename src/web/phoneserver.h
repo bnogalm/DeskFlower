@@ -46,6 +46,10 @@ public:
         quint16 port = kDefaultPort;      // 0: any free port
         std::function<QString()> folder;  // shared folder (absolute)
         QString deviceName;
+        // Optional: the shared folder is read and written with the rights this guard gives while
+        // it lives (a service running as LocalSystem acts as the signed-in user). A null guard
+        // refuses the request.
+        std::function<std::shared_ptr<void>()> asUser;
     };
 
     explicit PhoneServer(Options options, QObject *parent = nullptr);

@@ -110,22 +110,32 @@ int runNode(int argc, char **argv, bool serviceMode)
     df::FileTransfer transfer(&node);
     // Shared folder: chosen in the agent, or <user home>/Deskflower (looked up each time: users log
     // on and off). Phone uploads and files received through the clipboard go there.
+    // A chosen folder must still be acceptable (inside the signed-in user's folder; see
+    // isAllowedSharedFolder), and it is created with that user's rights.
     auto sharedFolder = [&settings, serviceMode, configDir] {
         QString folder = settings.value(QStringLiteral("sharedFolder")).toString();
+        if (!folder.isEmpty() && !df::platform::isAllowedSharedFolder(folder, serviceMode))
+            folder.clear();
         if (folder.isEmpty()) {
             const QString home = df::platform::interactiveUserHome(serviceMode);
             folder = home.isEmpty() ? QDir(configDir).filePath(QStringLiteral("Shared"))
                                     : QDir(home).filePath(QStringLiteral("Deskflower"));
         }
-        QDir().mkpath(folder);
+        if (const auto asUser = df::platform::actAsInteractiveUser(serviceMode))
+            QDir().mkpath(folder);
         return folder;
     };
-    df::ClipboardSync clipboard(&node, &transfer, &settings, sharedFolder);
+    // The clipboard follows the shared cursor (ClipboardSync).
+    df::ClipboardSync::Presence presence{[&input](qint64 graceMs) { return input.cursorHere(graceMs); },
+                                         [&workspace] { return workspace.masterId(); }};
+    df::ClipboardSync clipboard(&node, &transfer, &settings, presence, sharedFolder);
+    QObject::connect(&input, &df::InputController::cursorMoved, &clipboard, &df::ClipboardSync::cursorMoved);
     df::web::PhoneServer::Options phoneOptions;
     phoneOptions.configDir = configDir;
     phoneOptions.port = quint16(settings.value(QStringLiteral("phonePort"), df::web::PhoneServer::kDefaultPort).toInt());
     phoneOptions.folder = sharedFolder;
     phoneOptions.deviceName = node.name();
+    phoneOptions.asUser = [serviceMode] { return df::platform::actAsInteractiveUser(serviceMode); };
     df::web::PhoneServer phone(phoneOptions);
     df::RemoteView remoteView(&node, &workspace);
     PlatformInstaller installer(serviceMode, QDir(configDir).filePath(QStringLiteral("logs/update-install.log")));

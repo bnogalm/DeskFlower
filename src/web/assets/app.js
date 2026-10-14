@@ -2,6 +2,8 @@
 
 const CHUNK = 4 * 1024 * 1024;
 const IMAGE = /\.(jpe?g|png|gif|webp|bmp|heic|heif)$/i;
+// What the browser may open (the computer serves anything else as a download only).
+const OPENS = /\.(jpe?g|png|gif|webp|bmp|avif|heic|heif|mp4|m4v|mov|webm|mkv|3gp|mp3|m4a|aac|wav|ogg|oga|opus|flac|txt|log|pdf)$/i;
 let currentPath = '';
 
 const $ = (id) => document.getElementById(id);
@@ -67,6 +69,14 @@ function entryElement(entry) {
     link.href = `/api/file?path=${encodeURIComponent(path)}`;
     link.target = '_blank';
     link.rel = 'noopener';
+    if (!OPENS.test(entry.name)) {
+      // Not opened here, for safety: offer the download instead.
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        if (confirm(`"${entry.name}" cannot be opened in the browser, for safety. Download it to this phone?`))
+          window.location.href = `/api/file?path=${encodeURIComponent(path)}&dl=1`;
+      });
+    }
     if (IMAGE.test(entry.name)) {
       const img = document.createElement('img');
       img.loading = 'lazy';

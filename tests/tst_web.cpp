@@ -191,6 +191,28 @@ private slots:
         QCOMPARE(preview.size(), QSize(320, 240));
     }
 
+    void onlySafeFilesOpenInTheBrowser()
+    {
+        // A page or a drawing in the shared folder would run as this site: always a download.
+        for (const char *name : {"page.html", "drawing.svg"}) {
+            QFile f(m_folder.filePath(QString::fromLatin1(name)));
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>");
+            f.close();
+            const Reply r = request(m_phone, "GET", url("/api/file", QUrlQuery(QStringLiteral("path=%1").arg(name))));
+            QCOMPARE(r.status, 200);
+            QVERIFY(r.raw->rawHeader("Content-Disposition").startsWith("attachment"));
+            QCOMPARE(r.raw->rawHeader("Content-Type"), QByteArray("application/octet-stream"));
+        }
+        // A photo opens, sandboxed.
+        const Reply photo = request(m_phone, "GET", url("/api/file", QUrlQuery("path=photos/beach.png")));
+        QCOMPARE(photo.status, 200);
+        QVERIFY(photo.raw->rawHeader("Content-Disposition").startsWith("inline"));
+        QCOMPARE(photo.raw->rawHeader("Content-Type"), QByteArray("image/png"));
+        QVERIFY2(photo.raw->rawHeader("Content-Security-Policy").contains("sandbox"),
+                 photo.raw->rawHeader("Content-Security-Policy").constData());
+    }
+
     void pathsStayInsideTheSharedFolder()
     {
         QTemporaryDir outside;

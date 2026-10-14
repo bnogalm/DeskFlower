@@ -51,6 +51,7 @@ struct PairingManager::Incoming {
     QByteArray peerShare;
     QByteArray isk;
     QByteArray cachedReply;
+    qint64 replyAt = 0; // PairMsg2 is not sent (nor repeated) before then
     qint64 expiresAt = 0;
 };
 
@@ -108,14 +109,22 @@ void PairingManager::failOutgoing(const QString &reason, bool notifyPeer)
     emit failed(out->peerId, reason);
 }
 
-void PairingManager::failIncoming(const QString &reason, bool notifyPeer)
+void PairingManager::failIncoming(const QString &reason, bool notifyPeer, bool attempt)
 {
     if (!m_in)
         return;
     auto in = std::move(m_in);
     if (notifyPeer)
         abortTo(in->sid, reason, in->addr, in->port);
-    emit failed(in->peerId, reason);
+    QString shown = reason;
+    if (attempt && ++m_failedAttempts >= kMaxFailedAttempts) {
+        m_failedAttempts = 0;
+        m_lockedUntil = nowMs() + kLockoutMs;
+        shown = tr("%1. Too many failed attempts: pairing is blocked for %n minute(s)", nullptr,
+                   int(kLockoutMs / 60000))
+                    .arg(reason);
+    }
+    emit failed(in->peerId, shown);
 }
 
 bool PairingManager::start(const QByteArray &peerId, const QHostAddress &addr, quint16 port)
@@ -156,7 +165,7 @@ void PairingManager::cancel(const QByteArray &peerId)
     if (m_out && m_out->peerId == peerId)
         failOutgoing(tr("Cancelled by the user"), true);
     if (m_in && m_in->peerId == peerId)
-        failIncoming(tr("Cancelled by the user"), true);
+        failIncoming(tr("Cancelled by the user"), true, false);
 }
 
 void PairingManager::onTimer()
@@ -228,6 +237,13 @@ void PairingManager::handleAsResponder(wire::Type type, const QCborMap &msg, con
             abortTo({}, tr("The other device is not in discovery mode"), from, port);
             return;
         }
+        if (const qint64 left = m_lockedUntil - nowMs(); left > 0) {
+            abortTo({},
+                    tr("Too many failed pairing attempts: try again in %n minute(s)", nullptr,
+                       int((left + 59999) / 60000)),
+                    from, port);
+            return;
+        }
         if (m_in && m_in->stage != Incoming::Stage::Done) {
             abortTo({}, tr("The other device is pairing with another device"), from, port);
             return;
@@ -255,7 +271,8 @@ void PairingManager::handleAsResponder(wire::Type type, const QCborMap &msg, con
     if (type == wire::Type::PairMsg1) {
         const QByteArray share = msg.value(kY).toByteArray();
         if (m_in->stage == Incoming::Stage::Msg2Sent && share == m_in->peerShare) {
-            m_send(m_in->cachedReply, from, port); // duplicate
+            if (nowMs() >= m_in->replyAt)
+                m_send(m_in->cachedReply, from, port); // duplicate
             return;
         }
         if (m_in->stage != Incoming::Stage::ChallengeSent)
@@ -278,7 +295,16 @@ void PairingManager::handleAsResponder(wire::Type type, const QCborMap &msg, con
         reply.insert(kY, cpace.share());
         reply.insert(kC, CPace::confirmationTag(m_in->isk, 'B'));
         m_in->cachedReply = wire::cborPacket(wire::Type::PairMsg2, reply);
-        m_send(m_in->cachedReply, from, port);
+        if (m_failedAttempts == 0) {
+            m_send(m_in->cachedReply, from, port);
+            return;
+        }
+        // An attempt already failed: the answer to this guess waits.
+        m_in->replyAt = nowMs() + kRetryDelayMs;
+        QTimer::singleShot(kRetryDelayMs, this, [this, sid = m_in->sid, from, port] {
+            if (m_in && m_in->sid == sid && m_in->stage == Incoming::Stage::Msg2Sent)
+                m_send(m_in->cachedReply, from, port);
+        });
         return;
     }
 
@@ -299,6 +325,7 @@ void PairingManager::handleAsResponder(wire::Type type, const QCborMap &msg, con
         m_in->cachedReply = wire::cborPacket(wire::Type::PairDone, reply);
         m_in->stage = Incoming::Stage::Done;
         m_in->expiresAt = nowMs() + 10000; // keep answering duplicates for a while
+        m_failedAttempts = 0;
         crypto::wipe(m_in->isk);
         m_send(m_in->cachedReply, from, port);
         emit succeeded(TrustedPeer{m_in->peerId, m_in->peerPub, m_in->peerName, QDateTime::currentDateTimeUtc()},

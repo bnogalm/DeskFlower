@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QString>
 #include <functional>
+#include <memory>
 
 class QLocalSocket;
 
@@ -38,6 +39,16 @@ QString defaultConfigDir(bool serviceMode);
 // Home folder of the user logged on at the console (service mode: found through their token).
 // Empty if nobody is logged on.
 QString interactiveUserHome(bool serviceMode);
+
+// Whether `path` may be the shared folder. Windows service mode: inside the console user's home,
+// and reached without links, because the service writes and serves files there as LocalSystem.
+// Otherwise any absolute path (the service runs as the user). `why` says what is wrong.
+bool isAllowedSharedFolder(const QString &path, bool serviceMode, QString *why = nullptr);
+
+// File access with the console user's rights for as long as the returned guard lives. Windows
+// service mode: impersonates that user on the calling thread; null if nobody is logged on (or it
+// failed). Elsewhere a guard that does nothing: the service already runs as the user.
+std::shared_ptr<void> actAsInteractiveUser(bool serviceMode);
 
 // Restricts a directory to the account running the process: on Windows LocalSystem and
 // Administrators in service mode, otherwise the owner (the current user). False if that failed, or

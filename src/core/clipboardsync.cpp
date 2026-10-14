@@ -1,5 +1,7 @@
 #include "clipboardsync.h"
 
+#include "clock.h"
+#include "fsutil.h"
 #include "node.h"
 
 #include <QCborArray>
@@ -41,11 +43,15 @@ QStringList normalized(const QStringList &paths)
 }
 } // namespace
 
-ClipboardSync::ClipboardSync(Node *node, FileTransfer *transfer, Settings *settings, FolderProvider downloads,
-                             QObject *parent)
-    : QObject(parent), m_node(node), m_transfer(transfer), m_downloads(std::move(downloads)), m_settings(settings)
+ClipboardSync::ClipboardSync(Node *node, FileTransfer *transfer, Settings *settings, Presence presence,
+                             FolderProvider downloads, QObject *parent)
+    : QObject(parent),
+      m_node(node),
+      m_transfer(transfer),
+      m_downloads(std::move(downloads)),
+      m_settings(settings),
+      m_presence(std::move(presence))
 {
-    connect(m_node, &Node::peerConnected, this, &ClipboardSync::onPeerConnected);
     connect(m_node, &Node::messageReceived, this, &ClipboardSync::onMessage);
 }
 
@@ -87,7 +93,6 @@ void ClipboardSync::localChanged(const ClipboardData &raw, const QStringList &ra
         m_fetchingStamp = Stamp{};
         m_transfer->cancel(handle);
     }
-    broadcast();
 }
 
 void ClipboardSync::publish(Content *content)
@@ -104,10 +109,12 @@ void ClipboardSync::publish(Content *content)
             offer = withFiles;
             qCInfo(lcClipboard) << "Offering" << offer.files.size() << "copied files," << offer.fileBytes() << "bytes";
             if (content->stamp.author == m_node->id() && !offer.files.isEmpty())
-                emit filesNotice(tr("%n copied file(s) shared with your devices", nullptr, int(offer.files.size())), false);
+                emit filesNotice(tr("%n copied file(s): move the mouse to another device to paste them there",
+                                    nullptr, int(offer.files.size())),
+                                 false);
         } else {
             qCInfo(lcClipboard) << "Copied files are not shared:" << error;
-            emit filesNotice(tr("The copied files are not shared with your other devices: %1").arg(error), true);
+            emit filesNotice(tr("The copied files cannot be pasted on other devices: %1").arg(error), true);
         }
     }
     content->fileBytes = offer.fileBytes();
@@ -152,25 +159,66 @@ QCborMap ClipboardSync::announcement() const
     return msg;
 }
 
-void ClipboardSync::broadcast(const QByteArray &except)
+void ClipboardSync::sendTo(const QByteArray &peerId)
 {
-    const QCborMap msg = announcement();
-    for (const PeerView &p : m_node->peers()) {
-        if (p.connected && p.trusted && p.id != except)
-            m_node->sendMessage(p.id, msg);
-    }
+    if (!isEnabled() || m_current.stamp.version == 0 || peerId == m_node->id() || !m_node->isConnected(peerId))
+        return;
+    m_node->sendMessage(peerId, announcement()); // adopted only if newer than what the peer has
 }
 
-void ClipboardSync::onPeerConnected(const QByteArray &peerId)
+void ClipboardSync::cursorMoved(const QByteArray &from, const QByteArray &to)
 {
-    if (isEnabled() && m_current.stamp.version > 0)
-        m_node->sendMessage(peerId, announcement()); // adopted only if newer than what the peer has
+    const QByteArray self = m_node->id();
+    if (!isEnabled() || from.isEmpty() || to.isEmpty() || from == to)
+        return;
+    if (from == self) {
+        sendTo(to);
+        return;
+    }
+    if (to == self) {
+        m_expectFrom = from;
+        m_expectAt = nowMs();
+    } else {
+        QCborMap expect;
+        expect.insert(kT, QStringLiteral("clipFrom"));
+        expect.insert(QStringLiteral("s"), from);
+        m_node->sendMessage(to, expect);
+    }
+    QCborMap handOff;
+    handOff.insert(kT, QStringLiteral("clipTo"));
+    handOff.insert(QStringLiteral("d"), to);
+    m_node->sendMessage(from, handOff);
 }
 
 void ClipboardSync::onMessage(const QByteArray &peerId, const QCborMap &msg)
 {
-    if (msg.value(kT).toString() != QLatin1String("clip") || !isEnabled())
+    const QString type = msg.value(kT).toString();
+    if (!isEnabled())
         return;
+    if (type == QLatin1String("clipTo")) {
+        // The master moved the cursor from here to `d`: hand our clipboard on.
+        if (peerId == m_presence.master() && m_presence.cursorHere(kHandOffGraceMs))
+            sendTo(msg.value(QStringLiteral("d")).toByteArray());
+        return;
+    }
+    if (type == QLatin1String("clipFrom")) {
+        if (peerId == m_presence.master()) {
+            m_expectFrom = msg.value(QStringLiteral("s")).toByteArray();
+            m_expectAt = nowMs();
+        }
+        return;
+    }
+    if (type != QLatin1String("clip"))
+        return;
+    // Only the clipboard that follows the cursor here.
+    const bool expected = peerId == m_presence.master()
+                          || (peerId == m_expectFrom && nowMs() - m_expectAt < kExpectMs);
+    if (!expected || !m_presence.cursorHere(kHandOffGraceMs)) {
+        qCDebug(lcClipboard) << "Ignoring a clipboard from" << peerName(peerId) << "(the cursor did not bring it)";
+        return;
+    }
+    if (peerId == m_expectFrom)
+        m_expectFrom.clear(); // one clipboard per hand-off
     const Stamp stamp{quint64(msg.value(QStringLiteral("v")).toInteger()), msg.value(QStringLiteral("a")).toByteArray()};
     if (!stamp.newerThan(m_current.stamp) || (m_fetchHandle && !stamp.newerThan(m_fetchingStamp)))
         return;
@@ -276,7 +324,6 @@ void ClipboardSync::adopt(Content content, const QByteArray &from)
                              .arg(peerName(from)),
                          false);
     emit applyLocally(m_current.formats, m_current.files, m_current.pendingFiles);
-    broadcast(from);
 }
 
 void ClipboardSync::fetchFiles(FilesCallback done)
@@ -356,7 +403,7 @@ void ClipboardSync::pruneDownloads(const QString &clipboardDir) const
     std::sort(entries.begin(), entries.end(),
               [](const QString &a, const QString &b) { return a.toLongLong() < b.toLongLong(); });
     while (entries.size() > kKeptDownloads)
-        QDir(dir.filePath(entries.takeFirst())).removeRecursively();
+        fs::removeTree(dir.filePath(entries.takeFirst()));
 }
 
 } // namespace df

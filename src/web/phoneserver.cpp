@@ -72,6 +72,21 @@ HttpResponse respond(int status, QByteArray body = {}, const QByteArray &content
     return r;
 }
 
+// What a phone's browser may open from the shared folder: media, plain text and PDF. Anything else
+// (HTML, SVG, scripts...) could run as this site, with the phone's session, so it is only ever
+// downloaded. Decided by the type (name first, then content); nosniff stops the browser from
+// guessing otherwise.
+bool opensInBrowser(const QMimeType &type)
+{
+    static const QStringList kTypes = {QStringLiteral("image/jpeg"), QStringLiteral("image/png"),
+                                       QStringLiteral("image/gif"),  QStringLiteral("image/webp"),
+                                       QStringLiteral("image/bmp"),  QStringLiteral("image/avif"),
+                                       QStringLiteral("image/heic"), QStringLiteral("image/heif"),
+                                       QStringLiteral("text/plain"), QStringLiteral("application/pdf")};
+    const QString name = type.name();
+    return kTypes.contains(name) || name.startsWith(QLatin1String("video/")) || name.startsWith(QLatin1String("audio/"));
+}
+
 HttpResponse json(const QJsonObject &obj, int status = 200)
 {
     return respond(status, QJsonDocument(obj).toJson(QJsonDocument::Compact), "application/json");
@@ -331,18 +346,19 @@ HttpResponse PhoneServer::handle(const HttpRequest &r)
         const char *method;
         Handler handler;
         bool guarded; // session cookie required
+        bool files;   // reads or writes the shared folder
     };
     static const Route kRoutes[] = {
-        {"/", "GET", &PhoneServer::serveIndex, false},
-        {"/app.js", "GET", &PhoneServer::serveAsset, false},
-        {"/app.css", "GET", &PhoneServer::serveAsset, false},
-        {"/api/info", "GET", &PhoneServer::serveInfo, true},
-        {"/api/list", "GET", &PhoneServer::serveList, true},
-        {"/api/file", "GET", &PhoneServer::serveFile, true},
-        {"/api/thumb", "GET", &PhoneServer::serveThumb, true},
-        {"/api/upload", "PUT", &PhoneServer::receiveUpload, true},
-        {"/api/text", "POST", &PhoneServer::receiveText, true},
-        {"/api/logout", "POST", &PhoneServer::logout, false},
+        {"/", "GET", &PhoneServer::serveIndex, false, false},
+        {"/app.js", "GET", &PhoneServer::serveAsset, false, false},
+        {"/app.css", "GET", &PhoneServer::serveAsset, false, false},
+        {"/api/info", "GET", &PhoneServer::serveInfo, true, false},
+        {"/api/list", "GET", &PhoneServer::serveList, true, true},
+        {"/api/file", "GET", &PhoneServer::serveFile, true, true},
+        {"/api/thumb", "GET", &PhoneServer::serveThumb, true, true},
+        {"/api/upload", "PUT", &PhoneServer::receiveUpload, true, true},
+        {"/api/text", "POST", &PhoneServer::receiveText, true, false},
+        {"/api/logout", "POST", &PhoneServer::logout, false, false},
     };
     for (const Route &route : kRoutes) {
         if (r.path != QLatin1String(route.path))
@@ -351,6 +367,15 @@ HttpResponse PhoneServer::handle(const HttpRequest &r)
             return std::move(jsonError(405, QStringLiteral("Method not allowed")).header("Allow", route.method));
         if (route.guarded && !authorized(r))
             return jsonError(401, QStringLiteral("Scan the QR code again"));
+        // Files are opened with the signed-in user's rights, never the service's: a link inside
+        // the shared folder cannot lead anywhere that user could not go. A download keeps the file
+        // opened here.
+        std::shared_ptr<void> asUser;
+        if (route.files && m_options.asUser) {
+            asUser = m_options.asUser();
+            if (!asUser)
+                return jsonError(503, QStringLiteral("Nobody is signed in on the computer"));
+        }
         return (this->*route.handler)(r);
     }
     return jsonError(404, QStringLiteral("Not found"));
@@ -453,10 +478,14 @@ HttpResponse PhoneServer::serveFile(const HttpRequest &request)
     if (!file->open(QIODevice::ReadOnly))
         return jsonError(403, QStringLiteral("Cannot read the file"));
     const QString name = QFileInfo(path).fileName();
-    HttpResponse response = respond(200, {}, QMimeDatabase().mimeTypeForFile(path).name().toLatin1());
-    const bool download = request.queryValue(QStringLiteral("dl")) == QLatin1String("1");
-    response.header("Content-Disposition", QByteArray(download ? "attachment" : "inline")
+    const QMimeType type = QMimeDatabase().mimeTypeForFile(path);
+    const bool open = opensInBrowser(type) && request.queryValue(QStringLiteral("dl")) != QLatin1String("1");
+    // Downloads go as a neutral type: the browser saves them, it never renders them.
+    HttpResponse response = respond(200, {}, open ? type.name().toLatin1() : QByteArray("application/octet-stream"));
+    response.header("Content-Disposition", QByteArray(open ? "inline" : "attachment")
                                                + "; filename*=UTF-8''" + QUrl::toPercentEncoding(name));
+    if (open && type.name() != QLatin1String("application/pdf")) // browsers refuse sandboxed PDFs
+        response.header("Content-Security-Policy", "sandbox");
     response.stream = std::move(file); // streamed from disk
     return response;
 }

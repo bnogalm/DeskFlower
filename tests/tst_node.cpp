@@ -2,7 +2,9 @@
 // messages. Discovery is disabled; peers are found through a unicast beacon query.
 
 #include "node.h"
+#include "pairing.h"
 
+#include <QElapsedTimer>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -126,6 +128,45 @@ private slots:
         QVERIFY(!finishedA.first().at(1).toBool());
         QVERIFY(!finishedB.first().at(1).toBool());
         QTest::qWait(500);
+        QVERIFY(!a->isConnected(b->id()));
+    }
+
+    void repeatedWrongPinsBlockPairing()
+    {
+        // Each request gets a new PIN; after 3 failed attempts B refuses requests for 5 minutes,
+        // even with the right PIN, and after the first failure its answers wait 300 ms.
+        QTemporaryDir dirA, dirB;
+        auto a = makeNode(dirA.path());
+        auto b = makeNode(dirB.path());
+        b->setExploring(true);
+        a->addManualPeer(QHostAddress::LocalHost, b->dataPort());
+        QTRY_VERIFY(knows(*a, b->id()));
+
+        QSignalSpy pinShown(b.get(), &Node::pairingPinGenerated);
+        QSignalSpy finishedA(a.get(), &Node::pairingFinished);
+        QSignalSpy finishedB(b.get(), &Node::pairingFinished);
+        for (int attempt = 1; attempt <= PairingManager::kMaxFailedAttempts; ++attempt) {
+            QVERIFY(a->requestPairing(b->id()));
+            QTRY_COMPARE(pinShown.size(), attempt);
+            const QString pin = pinShown.last().at(2).toString();
+            const QString wrong = QStringLiteral("%1").arg((pin.toInt() + 1) % 1000000, 6, 10, QLatin1Char('0'));
+            QElapsedTimer answer;
+            answer.start();
+            QVERIFY(a->submitPin(b->id(), wrong));
+            QTRY_COMPARE(finishedA.size(), attempt);
+            QTRY_COMPARE(finishedB.size(), attempt);
+            if (attempt > 1)
+                QVERIFY2(answer.elapsed() >= PairingManager::kRetryDelayMs, qPrintable(QString::number(answer.elapsed())));
+        }
+        QVERIFY(finishedB.last().at(2).toString().contains(QStringLiteral("blocked")));
+
+        // Locked: no PIN is shown any more, and the request fails.
+        QVERIFY(a->requestPairing(b->id()));
+        QTRY_COMPARE(finishedA.size(), PairingManager::kMaxFailedAttempts + 1);
+        QVERIFY(!finishedA.last().at(1).toBool());
+        QVERIFY2(finishedA.last().at(2).toString().contains(QStringLiteral("Too many")),
+                 qPrintable(finishedA.last().at(2).toString()));
+        QCOMPARE(pinShown.size(), PairingManager::kMaxFailedAttempts);
         QVERIFY(!a->isConnected(b->id()));
     }
 

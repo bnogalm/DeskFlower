@@ -174,6 +174,11 @@ quint32 activeConsoleSession() { return kNoSession; }
 
 QString interactiveUserHome(bool) { return QDir::homePath(); }
 
+std::shared_ptr<void> actAsInteractiveUser(bool)
+{
+    return std::make_shared<int>(0); // the service runs as the user
+}
+
 bool canInstallPackages(bool) { return false; }
 
 bool launchPackageInstaller(const QString &, const QString &, std::function<void(bool, const QString &)>,

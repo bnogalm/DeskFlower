@@ -81,6 +81,11 @@ InputController::InputController(Node *node, Workspace *workspace, QObject *pare
 
 bool InputController::isMaster() const { return m_workspace->masterId() == m_node->id(); }
 
+bool InputController::cursorHere(qint64 graceMs) const
+{
+    return !m_cursorAway || nowMs() - m_cursorLeftAt < graceMs;
+}
+
 void InputController::emitSession(const QString &ev, QCborMap args)
 {
     if (!m_sessionUp)
@@ -211,6 +216,7 @@ void InputController::enter(const Crossing &target, Side side)
 {
     const QByteArray self = m_node->id();
     const bool wasLocal = m_active == self;
+    const QByteArray previous = m_active;
     m_remoteButtons.clear(); // in.leave releases them there
     if (!wasLocal) {
         QCborMap leave;
@@ -233,7 +239,14 @@ void InputController::enter(const Crossing &target, Side side)
     m.insert(kX, m_cursor.x());
     m.insert(kY, m_cursor.y());
     sendToActive(m);
+    if (wasLocal) {
+        m_cursorAway = true;
+        m_cursorLeftAt = nowMs();
+    }
+    m_cursorFrom = previous;
     emit activeDeviceChanged(m_active);
+    if (!m_viewing || m_viewAccepted)
+        emit cursorMoved(previous, m_active);
 }
 
 void InputController::enterView(const QByteArray &device, QPoint edgePoint, Side side)
@@ -288,6 +301,7 @@ void InputController::setViewAccepted(const QByteArray &device)
     m.insert(kY, m_cursor.y());
     sendToActive(m);
     sendViewCursor();
+    emit cursorMoved(m_cursorFrom, device);
 }
 
 void InputController::cancelView()
@@ -400,6 +414,9 @@ void InputController::returnLocal(QPoint at, bool notifyRemote)
     const QByteArray self = m_node->id();
     if (m_active == self)
         return;
+    const QByteArray previous = m_active;
+    // A remote view the device never accepted: the cursor was never there.
+    const bool wasThere = !m_viewing || m_viewAccepted;
     m_remoteButtons.clear();
     if (m_viewing) {
         m_viewing = false;
@@ -419,7 +436,10 @@ void InputController::returnLocal(QPoint at, bool notifyRemote)
     capture.insert(kX, at.x());
     capture.insert(kY, at.y());
     emitSession(QStringLiteral("capture"), capture);
+    m_cursorAway = false;
     emit activeDeviceChanged(m_active);
+    if (wasThere)
+        emit cursorMoved(previous, self);
 }
 
 void InputController::moveBy(int dx, int dy)
@@ -578,11 +598,14 @@ void InputController::onPeerMessage(const QByteArray &peerId, const QCborMap &ms
 
     if (type == QLatin1String("in.enter")) {
         m_haveMotionSeq = false;
+        m_cursorAway = false;
         QCborMap m;
         m.insert(kX, i(msg, kX));
         m.insert(kY, i(msg, kY));
         emitSession(QStringLiteral("mabs"), m);
     } else if (type == QLatin1String("in.leave")) {
+        m_cursorAway = true;
+        m_cursorLeftAt = nowMs();
         emitSession(QStringLiteral("releaseAll"));
         emitSession(QStringLiteral("hideCursor")); // the pointer is on another device now
     } else if (type == QLatin1String("in.btn")) {

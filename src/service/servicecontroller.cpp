@@ -484,12 +484,22 @@ void ServiceController::handleCommand(ipc::Connection *conn, const QCborMap &msg
         }
         m_workspace->setLayout(offsets);
     } else if (cmd == QLatin1String("setSharedFolder")) {
+        // The service writes and serves files there: only a folder of the signed-in user, created
+        // with that user's rights.
         const QString path = QDir::cleanPath(QDir::fromNativeSeparators(msg.value(QStringLiteral("path")).toString()));
-        if (QDir::isAbsolutePath(path) && QDir().mkpath(path)) {
+        QString why;
+        bool ok = platform::isAllowedSharedFolder(path, m_serviceMode, &why);
+        if (ok) {
+            const auto asUser = platform::actAsInteractiveUser(m_serviceMode);
+            ok = asUser && QDir().mkpath(path);
+        }
+        if (ok) {
             m_settings->setValue(QStringLiteral("sharedFolder"), path);
         } else {
             QCborMap ev = makeEvent(QStringLiteral("error"));
-            ev.insert(QStringLiteral("message"), tr("Cannot use %1 as the shared folder").arg(path));
+            ev.insert(QStringLiteral("message"),
+                      why.isEmpty() ? tr("Cannot use %1 as the shared folder").arg(QDir::toNativeSeparators(path))
+                                    : tr("Cannot use %1 as the shared folder: %2").arg(QDir::toNativeSeparators(path), why));
             conn->send(ev);
         }
         scheduleState();

@@ -3,6 +3,7 @@ qt_add_library(deskflower_core STATIC
     clipboardsync.h clipboardsync.cpp
     clock.h
     filedrag.h filedrag.cpp
+    fsutil.h fsutil.cpp
     filetransfer.h filetransfer.cpp
     cpace.h cpace.cpp
     crypto.h crypto.cpp

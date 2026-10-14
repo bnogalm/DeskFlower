@@ -34,7 +34,10 @@ The session helper authenticates to the service with a secret passed in its envi
 
 - **Identity:** every device has an X25519 key pair; `deviceId` = BLAKE2b(public key).
 - **Pairing:** 6-digit PIN with **CPace** (PAKE over ristretto255).
-  - The PIN is single use.
+  - The PIN is single use, and every request gets a new one.
+  - Guessing: after 3 attempts that do not end in pairing (wrong PIN, abandoned, timed out; not the
+    user cancelling) the device refuses pairing requests for 5 minutes, and after the first failure
+    it answers each guess only after 300 ms (`src/core/pairing.*`).
   - The channel identifier binds both public keys, so a man in the middle cannot swap them.
 - **Sessions:** `Noise_IK_25519_ChaChaPoly_SHA256` handshake.
   - AEAD packets with an explicit counter and an anti-replay window.
@@ -169,8 +172,15 @@ remote desktop session.
 
 ### Clipboard
 
-`src/core/clipboardsync.*`: one clipboard for the whole group of paired devices. Whatever was
-copied last, on any device, can be pasted on every other one.
+`src/core/clipboardsync.*`: the clipboard follows the shared mouse. What was copied on a device
+goes to the device the cursor moves to next, and to no other one.
+
+- Hand-off: the master sees every crossing from X to Y. If X is the master, it sends its clipboard
+  to Y; otherwise it tells Y to expect X's clipboard and tells X to send it to Y. X obeys only the
+  master, and only right after the cursor left it. Y accepts a clipboard only while the cursor is
+  on it, and only from the master or the device it was told to expect. Nothing is broadcast or
+  relayed: a password copied on one computer reaches only the one you move to, and no paired device
+  can replace another one's clipboard whenever it likes.
 
 - Formats: plain text, HTML and images (as PNG), up to 64 MB each. Small formats travel with the
   announcement over UDP; larger ones are fetched right away over encrypted TCP
@@ -188,9 +198,8 @@ copied last, on any device, can be pasted on every other one.
     kept).
   The sender only serves exactly what it offered. The receiver rejects unsafe paths (`..`,
   absolute paths, drive letters) and enforces the size limit.
-- Last-writer-wins, stamped with wall-clock time, so an old clipboard never overwrites a newer one
-  when devices reconnect. Gossiped to every connected peer, so it also reaches devices that are
-  only paired through a third one.
+- Last-writer-wins, stamped with wall-clock time: an older clipboard brought by the cursor never
+  replaces a newer one.
 - The OS clipboard is read and written by `src/clipboard/clipboardbridge.*`, in a process that runs
   as the user: on Windows in service mode the **agent** (the session helper runs as LocalSystem,
   and Windows does not give such a process the user's clipboard reliably: changes went unseen and
@@ -201,8 +210,8 @@ copied last, on any device, can be pasted on every other one.
   received, ready to paste, or why they could not be fetched.
 - "Share clipboard" (Screens tab) turns it off per device, persisted in
   `<config dir>/settings.json`. Clipboard content is never written to disk.
-- A device re-announces what it adopted with its own offer, so a device paired only through it gets
-  the formats (not files it has not transferred itself).
+- A device hands on what it adopted with its own offer: the formats, not files it has not
+  transferred itself.
 
 ### Dragging files between devices
 
@@ -238,6 +247,11 @@ Works with remote-view devices too. Not yet on Linux and macOS. Without a file l
 - **Shared folder:** where phone uploads and files received through the clipboard go. It is chosen
   in the agent (*Files → Change…*) and stored in `<config dir>/settings.json`; the default is
   `<user home>/Deskflower`. *Open* shows it in the file manager, and the tab shows its contents live.
+  - The Windows service runs as LocalSystem, so the folder must be inside the signed-in user's
+    folder and reached without links or junctions (a stored folder that no longer qualifies falls
+    back to the default). It is created with the user's rights.
+  - Received files are never written through a link or junction, and old clipboard and drag folders
+    are deleted without following links (`src/core/fsutil.*`).
 - **Phone access** (*Files* tab, off by default): an HTTPS web app on the local network
   (`src/web/`, port 24802; a small HTTP/1.1 server on Qt Network's `QSslServer`, because Qt HTTP
   Server is GPL-only). It lets a phone upload photos and files (camera included), browse and
@@ -252,8 +266,13 @@ Works with remote-view devices too. Not yet on Linux and macOS. Without a file l
     of a host-only or virtual adapter.
   - Uploads go in chunks of up to 8 MB to a hidden temporary file, can resume, and never
     overwrite an existing file. Downloads are streamed from disk.
-  - Every path resolves inside the shared folder, symbolic links included. Strict CSP (no inline
-    code), `Referrer-Policy: no-referrer`, `nosniff`, no framing.
+  - Every path resolves inside the shared folder, symbolic links included, and the Windows service
+    reads and writes the folder **as the signed-in user** (impersonation), never as LocalSystem:
+    a link inside the folder cannot reach anything that user could not.
+  - Only photos, video, audio, plain text and PDF open in the phone's browser (sandboxed). Anything
+    else (HTML, SVG, scripts, programs...) is always sent as a download, never rendered, so a file in
+    the folder cannot run as the site with the phone's session; the page asks before downloading it.
+  - Strict CSP (no inline code), `Referrer-Policy: no-referrer`, `nosniff`, no framing.
 
 ## Building
 

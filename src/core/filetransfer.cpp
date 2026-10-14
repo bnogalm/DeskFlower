@@ -1,6 +1,7 @@
 #include "filetransfer.h"
 
 #include "crypto.h"
+#include "fsutil.h"
 #include "node.h"
 #include "securestream.h"
 #include "wire.h"
@@ -280,6 +281,14 @@ quint64 FileTransfer::fetch(const QByteArray &peerId, quint64 offerId, const QSt
                             qint64 maxBytes, Callback done)
 {
     const quint64 handle = m_nextHandle++;
+    // The service may write with more rights than the folder's owner: never through a link they
+    // planted on the way.
+    if (fs::passesThroughLink(targetDir)) {
+        QTimer::singleShot(0, this, [done] {
+            done(FetchResult{false, QStringLiteral("The destination folder goes through a link"), {}, {}});
+        });
+        return handle;
+    }
     SecureStream *stream = m_node->openStream(peerId);
     if (!stream) {
         QTimer::singleShot(0, this, [done] { done(FetchResult{false, QStringLiteral("Peer not reachable"), {}, {}}); });
