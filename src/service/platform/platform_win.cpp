@@ -399,10 +399,47 @@ bool isClientAllowed(QLocalSocket *socket, bool serviceMode)
 
 quint32 activeConsoleSession() { return WTSGetActiveConsoleSessionId(); }
 
+namespace {
+// The thread's impersonation token, if any (to put back later).
+HANDLE currentThreadToken()
+{
+    HANDLE token = nullptr;
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE | TOKEN_QUERY, TRUE, &token))
+        return nullptr;
+    return token;
+}
+
+// The service's own rights for the lifetime of this object, also on a thread that acts as the
+// user (actAsInteractiveUser): WTSQueryUserToken needs them, and failing there made the phone
+// server lose the shared folder.
+class AsService
+{
+public:
+    AsService() : m_token(currentThreadToken())
+    {
+        if (m_token)
+            RevertToSelf();
+    }
+    ~AsService()
+    {
+        if (m_token) {
+            SetThreadToken(nullptr, m_token);
+            CloseHandle(m_token);
+        }
+    }
+    AsService(const AsService &) = delete;
+    AsService &operator=(const AsService &) = delete;
+
+private:
+    HANDLE m_token;
+};
+} // namespace
+
 QString interactiveUserHome(bool serviceMode)
 {
     if (!serviceMode)
         return QDir::homePath();
+    AsService self;
     HANDLE token = nullptr;
     if (!WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token))
         return {};
@@ -419,6 +456,7 @@ QString interactiveUserId(bool serviceMode)
 {
     if (!serviceMode)
         return {};
+    AsService self;
     HANDLE token = nullptr;
     if (!WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token))
         return {};
@@ -441,18 +479,33 @@ std::shared_ptr<void> actAsInteractiveUser(bool serviceMode)
 {
     if (!serviceMode)
         return std::make_shared<int>(0);
+    // Nested calls (the phone server acts as the user, then looks up the shared folder, which
+    // creates it as the user too) put back whatever the thread was before.
+    HANDLE previous = currentThreadToken();
     HANDLE token = nullptr;
-    if (!WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token))
-        return nullptr;
-    const BOOL ok = ImpersonateLoggedOnUser(token);
-    CloseHandle(token); // the thread keeps its own impersonation token
+    BOOL ok = FALSE;
+    {
+        AsService self;
+        ok = WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token);
+    }
+    if (ok) {
+        ok = ImpersonateLoggedOnUser(token);
+        CloseHandle(token); // the thread keeps its own impersonation token
+        if (!ok)
+            qCWarning(lcPlatform) << "Cannot act as the signed-in user:" << lastErrorString();
+    }
     if (!ok) {
-        qCWarning(lcPlatform) << "Cannot act as the signed-in user:" << lastErrorString();
+        if (previous)
+            CloseHandle(previous);
         return nullptr;
     }
-    return std::shared_ptr<void>(new int(0), [](void *p) {
-        RevertToSelf();
-        delete static_cast<int *>(p);
+    return std::shared_ptr<void>(previous ? previous : INVALID_HANDLE_VALUE, [](void *p) {
+        if (p != INVALID_HANDLE_VALUE) {
+            SetThreadToken(nullptr, p);
+            CloseHandle(p);
+        } else {
+            RevertToSelf();
+        }
     });
 }
 

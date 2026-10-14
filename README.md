@@ -292,9 +292,14 @@ Works with remote-view devices too. Not yet on Linux and macOS. Without a file l
     of a host-only or virtual adapter.
   - Uploads go in chunks of up to 8 MB to a hidden temporary file, can resume, and never
     overwrite an existing file. Downloads are streamed from disk.
+  - The page shows the folder live: while it is visible it asks for the listing every 2 s, and the
+    computer answers 304 (ETag) when nothing changed.
   - Every path resolves inside the shared folder, symbolic links included, and the Windows service
     reads and writes the folder **as the signed-in user** (impersonation), never as LocalSystem:
     a link inside the folder cannot reach anything that user could not.
+    Looking up who is signed in needs the service's own rights, so those lookups step out of the
+    impersonation for a moment (`platform_win.cpp`, `AsService`); nested impersonations restore
+    whatever the thread had before.
   - Only photos, video, audio, plain text and PDF open in the phone's browser (sandboxed). Anything
     else (HTML, SVG, scripts, programs...) is always sent as a download, never rendered, so a file in
     the folder cannot run as the site with the phone's session; the page asks before downloading it.

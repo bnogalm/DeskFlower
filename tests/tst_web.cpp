@@ -246,6 +246,36 @@ private slots:
         QCOMPARE(text.first().at(0).toString(), QString("hola desde el móvil"));
     }
 
+    void listingIsCheapToPoll()
+    {
+        auto list = [&](const QByteArray &tag) {
+            QNetworkRequest req(url("/api/list"));
+            if (!tag.isEmpty())
+                req.setRawHeader("If-None-Match", tag);
+            QNetworkReply *reply = m_phone.get(req);
+            QObject::connect(reply, &QNetworkReply::sslErrors, reply, [reply] { reply->ignoreSslErrors(); });
+            QEventLoop loop;
+            QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+            loop.exec();
+            const auto r = std::make_pair(reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(),
+                                          reply->rawHeader("ETag"));
+            reply->deleteLater();
+            return r;
+        };
+        const auto first = list({});
+        QCOMPARE(first.first, 200);
+        QVERIFY(!first.second.isEmpty());
+        QCOMPARE(list(first.second).first, 304); // unchanged
+        QFile f(m_folder.filePath("new-on-the-computer.txt"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("hi");
+        f.close();
+        const auto changed = list(first.second);
+        QCOMPARE(changed.first, 200); // a file appeared: the page redraws
+        QVERIFY(changed.second != first.second);
+        QVERIFY(QFile::remove(f.fileName()));
+    }
+
     void strangersCannotSendBodies()
     {
         // Headers announcing a large upload, without a session: refused before any body is read.

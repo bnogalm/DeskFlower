@@ -27,6 +27,7 @@ const char *reasonPhrase(int status)
     case 100: return "Continue";
     case 200: return "OK";
     case 303: return "See Other";
+    case 304: return "Not Modified";
     case 400: return "Bad Request";
     case 401: return "Unauthorized";
     case 403: return "Forbidden";

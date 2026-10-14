@@ -468,7 +468,14 @@ HttpResponse PhoneServer::serveList(const HttpRequest &request)
                                          ? QString()
                                          : QDir(root).relativeFilePath(dirPath));
     o.insert(QStringLiteral("entries"), entries);
-    return json(o);
+    // The page polls the folder every few seconds: an unchanged listing costs a 304.
+    HttpResponse response = json(o);
+    const QByteArray etag =
+        '"' + QCryptographicHash::hash(response.body, QCryptographicHash::Sha256).toHex().left(32) + '"';
+    if (request.header("if-none-match") == etag)
+        response = HttpResponse(304);
+    response.header("ETag", etag);
+    return response;
 }
 
 HttpResponse PhoneServer::serveFile(const HttpRequest &request)

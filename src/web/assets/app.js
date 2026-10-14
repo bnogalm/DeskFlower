@@ -111,19 +111,40 @@ function entryElement(entry) {
   return li;
 }
 
-async function load(path) {
-  const response = await api(`/api/list?path=${encodeURIComponent(path)}`);
+let listTag = '';  // ETag of the listing on screen
+let loading = 0;   // generation: a newer load wins over a slower older one
+
+// quiet: a refresh in the background (no message if it fails, nothing redrawn if unchanged).
+async function load(path, quiet = false) {
+  const generation = ++loading;
+  const headers = quiet && path === currentPath && listTag ? { 'If-None-Match': listTag } : {};
+  let response;
+  try {
+    response = await api(`/api/list?path=${encodeURIComponent(path)}`, { headers, cache: 'no-store' });
+  } catch (e) {
+    if (!quiet) toast('The computer is not reachable');
+    return;
+  }
+  if (generation !== loading || response.status === 304) return;
   if (!response.ok) {
-    toast('This folder is not available');
+    if (quiet && path) { load('', true); return; } // the folder went away
+    if (!quiet) toast('This folder is not available');
     if (path) load('');
     return;
   }
   const data = await response.json();
+  if (generation !== loading) return;
+  listTag = response.headers.get('ETag') || '';
   currentPath = data.path || '';
   renderCrumbs(currentPath);
   $('files').replaceChildren(...data.entries.map(entryElement));
   $('empty').hidden = data.entries.length > 0;
 }
+
+// Live view of the shared folder: polled while the page is visible.
+const REFRESH_MS = 2000;
+setInterval(() => { if (!document.hidden) load(currentPath, true); }, REFRESH_MS);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) load(currentPath, true); });
 
 // --- Uploads -------------------------------------------------------------------------------------
 
