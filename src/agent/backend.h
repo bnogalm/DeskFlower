@@ -27,6 +27,8 @@ class Backend : public QObject
     Q_PROPERTY(QString selfName READ selfName NOTIFY stateChanged)
     Q_PROPERTY(QString fingerprint READ fingerprint NOTIFY stateChanged)
     Q_PROPERTY(int port READ port NOTIFY stateChanged)
+    // data, discovery, phone (configured) and dataInUse, tcpInUse, discoveryInUse, phoneInUse.
+    Q_PROPERTY(QVariantMap ports READ ports NOTIFY stateChanged)
     Q_PROPERTY(bool exploring READ exploring NOTIFY stateChanged)
     Q_PROPERTY(bool clipboardSharing READ clipboardSharing NOTIFY stateChanged)
     // Start the agent at every sign-in (the service manages it; not supported everywhere).
@@ -68,6 +70,7 @@ public:
     QString selfName() const { return m_selfName; }
     QString fingerprint() const { return m_fingerprint; }
     int port() const { return m_port; }
+    QVariantMap ports() const { return m_ports; }
     bool exploring() const { return m_exploring; }
     bool clipboardSharing() const { return m_clipboardSharing; }
     bool autostartSupported() const { return m_autostartSupported; }
@@ -100,6 +103,10 @@ public:
     // agent starts it again: at its next launch, or with startService (the banner's button).
     Q_INVOKABLE void stopServiceAndQuit();
     Q_INVOKABLE void startService();
+    // Stops the service and starts it again (new ports take effect).
+    Q_INVOKABLE void restartService();
+    // Advanced settings: saved by the service, used from its next start.
+    Q_INVOKABLE void setPorts(int data, int discovery, int phone);
     Q_INVOKABLE void setExploring(bool on);
     Q_INVOKABLE void pair(const QString &peerId);
     Q_INVOKABLE void submitPin(const QString &peerId, const QString &pin);
@@ -168,6 +175,8 @@ private:
     QString m_selfName;
     QString m_fingerprint;
     int m_port = 0;
+    QVariantMap m_ports;
+    int m_restartAttempts = 0; // restartService: starts left to try once the service is gone
     bool m_exploring = false;
     bool m_clipboardSharing = true;
     // Windows service mode: this agent (running as the user) owns the user's clipboard for sharing.

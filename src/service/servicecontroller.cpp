@@ -453,6 +453,27 @@ void ServiceController::handleCommand(ipc::Connection *conn, const QCborMap &msg
     }
     if (cmd == QLatin1String("getState")) {
         conn->send(stateEvent());
+    } else if (cmd == QLatin1String("setPorts")) {
+        // Saved for the next start of the service (the agent offers to restart it).
+        const int data = int(msg.value(QStringLiteral("data")).toInteger());
+        const int discovery = int(msg.value(QStringLiteral("discovery")).toInteger());
+        const int phone = int(msg.value(QStringLiteral("phone")).toInteger());
+        auto valid = [](int p) { return p >= 1024 && p <= 65535; };
+        QString problem;
+        if (!valid(data) || !valid(discovery) || !valid(phone))
+            problem = tr("Ports must be between 1024 and 65535");
+        else if (data == discovery || data == phone || discovery == phone)
+            problem = tr("The three ports must be different");
+        if (problem.isEmpty()) {
+            m_settings->setValue(QStringLiteral("dataPort"), data);
+            m_settings->setValue(QStringLiteral("discoveryPort"), discovery);
+            m_settings->setValue(QStringLiteral("phonePort"), phone);
+        } else {
+            QCborMap ev = makeEvent(QStringLiteral("error"));
+            ev.insert(QStringLiteral("message"), problem);
+            conn->send(ev);
+        }
+        scheduleState();
     } else if (cmd == QLatin1String("stopService")) {
         // The user quit DeskFlower: everything stops (network, phone access, session helper)
         // until the agent starts the service again, or the next boot does.
@@ -753,6 +774,18 @@ QCborMap ServiceController::stateEvent() const
     ev.insert(QStringLiteral("autostart"), m_settings->value(QStringLiteral("agentAutostart"), true).toBool());
     ev.insert(QStringLiteral("files"), filesState());
     ev.insert(QStringLiteral("updates"), updatesState());
+    // Configured (used from the next start) and in use now.
+    QCborMap ports;
+    ports.insert(QStringLiteral("data"), m_settings->value(QStringLiteral("dataPort"), wire::kDefaultDataPort).toInt());
+    ports.insert(QStringLiteral("discovery"),
+                 m_settings->value(QStringLiteral("discoveryPort"), wire::kDiscoveryPort).toInt());
+    ports.insert(QStringLiteral("phone"),
+                 m_settings->value(QStringLiteral("phonePort"), web::PhoneServer::kDefaultPort).toInt());
+    ports.insert(QStringLiteral("dataInUse"), m_node->dataPort());
+    ports.insert(QStringLiteral("tcpInUse"), m_node->tcpPort());
+    ports.insert(QStringLiteral("discoveryInUse"), m_node->discoveryPort());
+    ports.insert(QStringLiteral("phoneInUse"), m_phone->isRunning() ? m_phone->port() : 0);
+    ev.insert(QStringLiteral("ports"), ports);
     ev.insert(QStringLiteral("peers"), peers);
     ev.insert(QStringLiteral("workspace"), workspaceState());
     if (m_remoteView->isStreaming()) {

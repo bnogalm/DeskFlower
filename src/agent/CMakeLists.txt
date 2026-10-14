@@ -18,6 +18,7 @@ qt_add_qml_module(deskflower-agent
         qml/PinEntryDialog.qml
         qml/ViewRequestDialog.qml
         qml/AboutDialog.qml
+        qml/AdvancedSettingsWindow.qml
         qml/Bouquet.qml
 )
 

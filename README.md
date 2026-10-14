@@ -509,5 +509,11 @@ session helper logs to `<config dir>/logs/session.log`.
 
 Ports: UDP 24800 (discovery via multicast `239.255.77.100` and broadcast), UDP 24801 (sessions),
 TCP 24801 (file transfers) and TCP 24802 (phone access over HTTPS, only while enabled).
+All three can be changed in the agent (*⋮ → Advanced settings…*, a window of its own; or
+`deskflower-agent --page settings`). They are stored as `dataPort`, `discoveryPort` and `phonePort`
+in `<config dir>/settings.json` and used from the service's next start (the window offers *Restart
+service*); `--port` on the service command line overrides `dataPort`. The discovery port must be
+the same on every device; the data port is learned from beacons. The firewall rules allow the
+program, not fixed ports.
 The service adds its firewall rules when installed; run from a console, Windows asks for
 permission on first run.

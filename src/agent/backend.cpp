@@ -39,6 +39,7 @@ Backend::Backend(const QString &instance, ThumbnailProvider *thumbnails, QObject
 {
     connect(&m_conn, &df::ipc::Connection::messageReceived, this, &Backend::onMessage);
     connect(&m_socket, &QLocalSocket::connected, this, [this] {
+        m_restartAttempts = 0;
         setServiceStartError({});
         emit serviceConnectedChanged();
     });
@@ -47,6 +48,11 @@ Backend::Backend(const QString &instance, ThumbnailProvider *thumbnails, QObject
         m_reconnect.start();
     });
     connect(&m_socket, &QLocalSocket::errorOccurred, this, [this] {
+        // restartService: the old process may still be stopping, so keep trying for a while.
+        if (m_restartAttempts > 0 && m_socket.error() == QLocalSocket::ServerNotFoundError) {
+            --m_restartAttempts;
+            startService();
+        }
         // Launching the agent starts a service that the user stopped (by quitting) last time.
         if (!m_triedStart && m_socket.error() == QLocalSocket::ServerNotFoundError) {
             m_triedStart = true;
@@ -258,6 +264,23 @@ void Backend::stopServiceAndQuit()
     QCoreApplication::quit();
 }
 
+void Backend::restartService()
+{
+    if (!serviceConnected())
+        return startService();
+    m_restartAttempts = 15;
+    command(QStringLiteral("stopService"));
+}
+
+void Backend::setPorts(int data, int discovery, int phone)
+{
+    QCborMap a;
+    a.insert(QStringLiteral("data"), data);
+    a.insert(QStringLiteral("discovery"), discovery);
+    a.insert(QStringLiteral("phone"), phone);
+    command(QStringLiteral("setPorts"), a);
+}
+
 void Backend::setServiceStartError(const QString &error)
 {
     if (m_serviceStartError == error)
@@ -374,6 +397,7 @@ void Backend::onMessage(const QCborMap &msg)
         m_selfName = self.value(QStringLiteral("name")).toString();
         m_fingerprint = self.value(QStringLiteral("fingerprint")).toString();
         m_port = int(self.value(QStringLiteral("port")).toInteger());
+        m_ports = msg.value(QStringLiteral("ports")).toMap().toVariantMap();
         m_selfVersion = self.value(QStringLiteral("version")).toString();
         m_updates = msg.value(QStringLiteral("updates")).toMap().toVariantMap();
         m_exploring = msg.value(QStringLiteral("exploring")).toBool();

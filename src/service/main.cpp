@@ -94,9 +94,14 @@ int runNode(int argc, char **argv, bool serviceMode)
     df::installFileLogging(QDir(configDir).filePath(QStringLiteral("logs")), QStringLiteral("service.log"), !serviceMode);
     df::platform::installQuitHandlers();
 
+    df::Settings settings(configDir);
     df::Node::Options options;
     options.configDir = configDir;
-    options.dataPort = quint16(parser.value(portOpt).toUInt());
+    // Ports: Advanced settings in the agent (applied at the next start); --port wins.
+    options.dataPort = parser.isSet(portOpt)
+                           ? quint16(parser.value(portOpt).toUInt())
+                           : quint16(settings.value(QStringLiteral("dataPort"), df::wire::kDefaultDataPort).toInt());
+    options.discoveryPort = quint16(settings.value(QStringLiteral("discoveryPort"), df::wire::kDiscoveryPort).toInt());
     options.enableDiscovery = !parser.isSet(noDiscoveryOpt);
 
     df::Node node(options);
@@ -128,7 +133,6 @@ int runNode(int argc, char **argv, bool serviceMode)
                          if (event == E::Lock || event == E::Logoff || event == E::ConsoleDisconnect)
                              input.returnHome();
                      });
-    df::Settings settings(configDir);
     df::FileTransfer transfer(&node);
     // Shared folder: chosen in the agent, or <user home>/Deskflower (looked up each time: users log
     // on and off). Phone uploads and files received through the clipboard go there.

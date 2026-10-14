@@ -2,7 +2,8 @@
 
 // Small persistent key/value settings shared by the service's components
 // (<config dir>/settings.json). Keys in use:
-//   shareClipboard (bool), sharedFolder (string), phoneAccess (bool), phonePort (int)
+//   shareClipboard (bool), sharedFolder (string), phoneAccess (bool), phonePort (int),
+//   dataPort (int), discoveryPort (int)
 
 #include <QJsonObject>
 #include <QObject>

@@ -53,7 +53,8 @@ int main(int argc, char *argv[])
     parser.addHelpOption();
     QCommandLineOption instanceOpt(QStringLiteral("instance"), QStringLiteral("Service instance to control."),
                                    QStringLiteral("name"));
-    QCommandLineOption pageOpt(QStringLiteral("page"), QStringLiteral("Page to open: devices, screens or files."),
+    QCommandLineOption pageOpt(QStringLiteral("page"),
+                               QStringLiteral("Page to open: devices, screens, files or settings (advanced)."),
                                QStringLiteral("page"), QStringLiteral("devices"));
     QCommandLineOption minimizedOpt(QStringLiteral("minimized"),
                                     QStringLiteral("Start in the system tray (used at logon)."));
@@ -72,8 +73,9 @@ int main(int argc, char *argv[])
                                  {QStringLiteral("startHidden"), tray && parser.isSet(minimizedOpt)},
                                  {QStringLiteral("hideOnClose"), tray},
                                  {QStringLiteral("initialPage"), parser.value(pageOpt) == QLatin1String("screens") ? 1
-                                     : parser.value(pageOpt) == QLatin1String("files")  ? 2
-                                                                                        : 0}});
+                                     : parser.value(pageOpt) == QLatin1String("files")    ? 2
+                                     : parser.value(pageOpt) == QLatin1String("settings") ? 3
+                                                                                          : 0}});
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
                      [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     engine.loadFromModule("Deskflower", "Main");

@@ -63,6 +63,7 @@ public:
     QString fingerprint() const { return m_identity.fingerprint(); }
     quint16 dataPort() const { return m_socket.localPort(); }
     quint16 tcpPort() const { return m_tcp.serverPort(); }
+    quint16 discoveryPort() const { return m_options.discoveryPort; }
     bool setName(const QString &name);
 
     bool isExploring() const { return m_exploring; }

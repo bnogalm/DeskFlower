@@ -7,7 +7,7 @@ ApplicationWindow {
     id: window
 
     required property Backend backend
-    property int initialPage: 0
+    property int initialPage: 0       // 3: devices, with the advanced settings window open
     property bool startHidden: false  // --minimized: only the tray icon at first
     property bool hideOnClose: false  // with a system tray, closing hides the window
 
@@ -90,6 +90,15 @@ ApplicationWindow {
                             checked = Qt.binding(() => window.backend.autostart)
                         }
                     }
+                    MenuItem {
+                        text: qsTr("Advanced settings…")
+                        enabled: window.backend.serviceConnected
+                        onTriggered: {
+                            advancedSettings.show()
+                            advancedSettings.raise()
+                            advancedSettings.requestActivate()
+                        }
+                    }
                     MenuSeparator {}
                     MenuItem {
                         text: qsTr("About DeskFlower")
@@ -150,7 +159,7 @@ ApplicationWindow {
         TabBar {
             id: tabs
             Layout.fillWidth: true
-            currentIndex: window.initialPage
+            currentIndex: window.initialPage < 3 ? window.initialPage : 0
             TabButton { text: qsTr("Devices") }
             TabButton { text: qsTr("Screens") }
             TabButton { text: qsTr("Files") }
@@ -233,6 +242,12 @@ ApplicationWindow {
         id: viewRequest
         anchors.centerIn: parent
         onAnswered: decision => window.backend.answerView(peerId, decision)
+    }
+
+    AdvancedSettingsWindow {
+        id: advancedSettings
+        backend: window.backend
+        Component.onCompleted: if (window.initialPage === 3) show()
     }
 
     AboutDialog {
