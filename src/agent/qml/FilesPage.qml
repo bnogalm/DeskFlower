@@ -5,7 +5,7 @@ import QtQuick.Dialogs
 import QtQuick.Layouts
 import Qt.labs.folderlistmodel
 
-// Shared folder: where phone uploads and files received through the clipboard go. Phones on the
+// Shared folder: where phone uploads go (copied and dragged files wait elsewhere). Phones on the
 // local network reach it over HTTPS after scanning the QR code.
 Item {
     id: page
@@ -236,5 +236,54 @@ Item {
         title: qsTr("Choose the shared folder")
         currentFolder: page.backend.sharedFolderUrl
         onAccepted: page.backend.setSharedFolder(selectedFolder)
+    }
+
+    // A folder the service refused: say why and offer to choose another.
+    Dialog {
+        id: rejectedDialog
+        property string path
+        property string reason
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 48, 460)
+        modal: true
+        title: qsTr("This folder cannot be shared")
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                text: qsTr("%1 cannot be the shared folder: %2.").arg(rejectedDialog.path).arg(rejectedDialog.reason)
+            }
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                text: qsTr("Phones and paired computers can put files there, so it must be an ordinary folder "
+                           + "of yours, such as one in Documents or Desktop. The shared folder stays %1.")
+                      .arg(page.backend.sharedFolder)
+            }
+        }
+        footer: DialogButtonBox {
+            Button {
+                text: qsTr("Choose another folder…")
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+            Button {
+                text: qsTr("Cancel")
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+        }
+        onAccepted: folderDialog.open()
+    }
+
+    Connections {
+        target: page.backend
+        function onSharedFolderRejected(path, reason) {
+            rejectedDialog.path = path
+            rejectedDialog.reason = reason
+            rejectedDialog.open()
+        }
     }
 }

@@ -204,7 +204,7 @@ async function uploadAll(files) {
 // --- Wiring --------------------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', async () => {
-  for (const id of ['pick-files', 'take-photo']) {
+  for (const id of ['pick-files', 'take-photo', 'record-video']) {
     $(id).addEventListener('change', (event) => {
       const files = [...event.target.files];
       event.target.value = '';

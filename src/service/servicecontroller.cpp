@@ -56,7 +56,7 @@ ServiceController::ServiceController(Node *node, Workspace *workspace, InputCont
                                      ClipboardSync *clipboard, FileTransfer *transfer, Settings *settings,
                                      web::PhoneServer *phone,
                                      RemoteView *remoteView, Updater *updater, std::function<QString()> sharedFolder,
-                                     const QString &instance,
+                                     std::function<QString()> receivedFolder, const QString &instance,
                                      bool serviceMode, const QByteArray &sessionToken, QObject *parent)
     : QObject(parent),
       m_node(node),
@@ -68,6 +68,7 @@ ServiceController::ServiceController(Node *node, Workspace *workspace, InputCont
       m_remoteView(remoteView),
       m_updater(updater),
       m_sharedFolder(std::move(sharedFolder)),
+      m_receivedFolder(std::move(receivedFolder)),
       m_sessionToken(sessionToken),
       m_instance(instance),
       m_serviceMode(serviceMode)
@@ -122,7 +123,7 @@ ServiceController::ServiceController(Node *node, Workspace *workspace, InputCont
                 done(r.value(QStringLiteral("ok")).toBool(), r.value(QStringLiteral("error")).toString());
         });
     };
-    m_fileDrag = std::make_unique<FileDrag>(m_node, transfer, m_workspace, m_input, agent, m_sharedFolder);
+    m_fileDrag = std::make_unique<FileDrag>(m_node, transfer, m_workspace, m_input, agent, m_receivedFolder);
     connect(m_fileDrag.get(), &FileDrag::notice, this, [this](const QString &text, bool problem) {
         QCborMap ev = makeEvent(QStringLiteral("notice"));
         ev.insert(QStringLiteral("message"), text);
@@ -524,10 +525,9 @@ void ServiceController::handleCommand(ipc::Connection *conn, const QCborMap &msg
         if (ok) {
             m_settings->setValue(QStringLiteral("sharedFolder"), path);
         } else {
-            QCborMap ev = makeEvent(QStringLiteral("error"));
-            ev.insert(QStringLiteral("message"),
-                      why.isEmpty() ? tr("Cannot use %1 as the shared folder").arg(QDir::toNativeSeparators(path))
-                                    : tr("Cannot use %1 as the shared folder: %2").arg(QDir::toNativeSeparators(path), why));
+            QCborMap ev = makeEvent(QStringLiteral("sharedFolderRejected"));
+            ev.insert(QStringLiteral("path"), QDir::toNativeSeparators(path));
+            ev.insert(QStringLiteral("reason"), why.isEmpty() ? tr("it cannot be created") : why);
             conn->send(ev);
         }
         scheduleState();

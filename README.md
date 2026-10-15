@@ -220,8 +220,10 @@ goes to the device the cursor moves to next, and to no other one.
     Explorer copies them with its own progress. Without a list (more files), a deferred `CF_HDROP`
     is offered instead.
   - Elsewhere (session helper) the files are fetched first, then put on the clipboard.
-  - Transferred files are stored in `<user home>/Deskflower/Clipboard/<stamp>/` (the last 3 are
-    kept).
+  - Transferred files are stored in `<received folder>/Clipboard/<stamp>/` (the last 3 are kept).
+    The received folder is hidden and apart from the shared folder, so phones never see these files
+    (`platform::receivedFolder`): `%LOCALAPPDATA%\Deskflower\Received` on Windows,
+    `~/.cache/deskflower/received` on Linux, `~/Library/Caches/Deskflower/Received` on macOS.
   The sender only serves exactly what it offered. The receiver rejects unsafe paths (`..`,
   absolute paths, drive letters) and enforces the size limit.
 - Last-writer-wins, stamped with wall-clock time: an older clipboard brought by the cursor never
@@ -258,7 +260,7 @@ application that takes files. They are **moved** (Windows only for now).
    `FileContents`): nothing travels until the drop target reads them. Back on the source device,
    the originals are dragged and Windows moves them itself.
 3. Releasing the button ends that drag with a drop. The drop target reads the files; the device
-   transfers them then (into `<shared folder>/Dragged/`, the last 3 kept) and serves them.
+   transfers them then (into `<received folder>/Dragged/`, the last 3 kept) and serves them.
 4. Once every file arrived complete (the transfer checks every size; the stream is authenticated),
    the source sends the originals to the **Recycle Bin**. If nothing took them, or anything failed,
    the originals stay.
@@ -270,18 +272,28 @@ Works with remote-view devices too. Not yet on Linux and macOS. Without a file l
 
 ### Shared folder and phone access
 
-- **Shared folder:** where phone uploads and files received through the clipboard go. It is chosen
+- **Shared folder:** where phone uploads go, and what phones see. Files copied or dragged from
+  paired devices are not there (see the received folder above). It is chosen
   in the agent (*Files → Change…*) and stored in `<config dir>/settings.json`; the default is
   `<user home>/Deskflower`. *Open* shows it in the file manager, and the tab shows its contents live.
-  - The Windows service runs as LocalSystem, so the folder must be inside the signed-in user's
-    folder and reached without links or junctions (a stored folder that no longer qualifies falls
-    back to the default). It is created with the user's rights.
+  - Phones and paired computers put files there, so it must be an ordinary folder of the user
+    (`platform::sharedFolderProblem`): never the whole home folder, a hidden folder, `AppData`
+    (Windows; it holds the Startup folder) or `Library` (macOS), a whole drive or a system folder
+    (Windows, Program Files, ProgramData, `/etc`, `/usr`...). The agent says why it refuses a
+    folder and offers to choose another.
+  - The Windows service runs as LocalSystem, so there the folder must also be inside the signed-in
+    user's folder and reached without links or junctions (a stored folder that no longer qualifies
+    falls back to the default). It is created with the user's rights. When nobody is signed in,
+    phones get no files, and files copied or dragged from paired devices go to a folder only the
+    service can reach (`ProgramData\Deskflower\Received`).
   - Received files are never written through a link or junction, and old clipboard and drag folders
     are deleted without following links (`src/core/fsutil.*`).
 - **Phone access** (*Files* tab, off by default): an HTTPS web app on the local network
   (`src/web/`, port 24802; a small HTTP/1.1 server on Qt Network's `QSslServer`, because Qt HTTP
   Server is GPL-only). It lets a phone upload photos and files (camera included), browse and
   download the shared folder, and send text to the computer's clipboard.
+  - *Upload files* opens the phone's file picker; *Take a photo* and *Record a video* open the
+    camera directly (one kind per button: with several in `accept`, phones show the gallery).
   - The certificate is self-signed: EC P-256, generated with OpenSSL, with the LAN addresses in
     its subjectAltName, and kept for 825 days. Phones warn about it once.
   - Access: the QR code carries a single-use token valid for 10 minutes; a used or expired code
@@ -298,8 +310,9 @@ Works with remote-view devices too. Not yet on Linux and macOS. Without a file l
     reads and writes the folder **as the signed-in user** (impersonation), never as LocalSystem:
     a link inside the folder cannot reach anything that user could not.
     Looking up who is signed in needs the service's own rights, so those lookups step out of the
-    impersonation for a moment (`platform_win.cpp`, `AsService`); nested impersonations restore
-    whatever the thread had before.
+    impersonation for a moment (`platform_win.cpp`, `AsService`): they only read the user's token
+    (SID and profile folder), no file is touched with those rights. Nested impersonations restore
+    whatever the thread had before (`tests/tst_platform.cpp`).
   - Only photos, video, audio, plain text and PDF open in the phone's browser (sandboxed). Anything
     else (HTML, SVG, scripts, programs...) is always sent as a download, never rendered, so a file in
     the folder cannot run as the site with the phone's session; the page asks before downloading it.

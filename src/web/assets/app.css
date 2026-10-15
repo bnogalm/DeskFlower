@@ -54,6 +54,8 @@ main { max-width: 760px; margin: 0 auto; }
   margin: 12px 0;
 }
 
+.actions .primary { grid-column: 1 / -1; } /* files on their own row, the camera below */
+
 .button, button {
   display: flex;
   align-items: center;

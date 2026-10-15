@@ -544,6 +544,9 @@ void Backend::onMessage(const QCborMap &msg)
             m_clipboard.apply(msg.value(QStringLiteral("f")).toMap(), files);
     } else if (ev == QLatin1String("notice")) {
         emit notice(msg.value(QStringLiteral("message")).toString(), msg.value(QStringLiteral("problem")).toBool());
+    } else if (ev == QLatin1String("sharedFolderRejected")) {
+        emit sharedFolderRejected(msg.value(QStringLiteral("path")).toString(),
+                                  msg.value(QStringLiteral("reason")).toString());
     } else if (ev == QLatin1String("error")) {
         emit serviceError(msg.value(QStringLiteral("message")).toString());
     } else if (ev == QLatin1String("quit")) {

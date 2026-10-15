@@ -433,15 +433,32 @@ public:
 private:
     HANDLE m_token;
 };
+
+UserTokenSource &userTokenSource()
+{
+    static UserTokenSource source;
+    return source;
+}
+
+// The console user's primary token (closed by the caller), with the service's own rights.
+HANDLE consoleUserToken()
+{
+    AsService self;
+    if (const UserTokenSource &source = userTokenSource())
+        return source();
+    HANDLE token = nullptr;
+    return WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token) ? token : nullptr;
+}
 } // namespace
+
+void setUserTokenSourceForTests(UserTokenSource source) { userTokenSource() = std::move(source); }
 
 QString interactiveUserHome(bool serviceMode)
 {
     if (!serviceMode)
         return QDir::homePath();
-    AsService self;
-    HANDLE token = nullptr;
-    if (!WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token))
+    const HANDLE token = consoleUserToken();
+    if (!token)
         return {};
     wchar_t path[MAX_PATH] = {};
     DWORD size = MAX_PATH;
@@ -456,9 +473,8 @@ QString interactiveUserId(bool serviceMode)
 {
     if (!serviceMode)
         return {};
-    AsService self;
-    HANDLE token = nullptr;
-    if (!WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token))
+    const HANDLE token = consoleUserToken();
+    if (!token)
         return {};
     QString sid;
     DWORD size = 0;
@@ -482,12 +498,8 @@ std::shared_ptr<void> actAsInteractiveUser(bool serviceMode)
     // Nested calls (the phone server acts as the user, then looks up the shared folder, which
     // creates it as the user too) put back whatever the thread was before.
     HANDLE previous = currentThreadToken();
-    HANDLE token = nullptr;
-    BOOL ok = FALSE;
-    {
-        AsService self;
-        ok = WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &token);
-    }
+    const HANDLE token = consoleUserToken();
+    BOOL ok = token != nullptr;
     if (ok) {
         ok = ImpersonateLoggedOnUser(token);
         CloseHandle(token); // the thread keeps its own impersonation token

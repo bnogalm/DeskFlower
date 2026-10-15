@@ -11,6 +11,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QSignalSpy>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QSslSocket>
 #include <QTest>
@@ -127,6 +128,29 @@ private slots:
         QNetworkAccessManager other;
         QCOMPARE(request(other, "GET", url("/", QUrlQuery("t=" + token))).status, 403);
         QCOMPARE(request(m_phone, "GET", url("/api/info")).json().value("name").toString(), QString("Test PC"));
+    }
+
+    // Phones open the camera only for a single kind in accept (several: the gallery), and a
+    // picker without capture for files.
+    void cameraButtonsOpenTheCamera()
+    {
+        const QByteArray page = request(m_phone, "GET", url("/")).body;
+        static const QRegularExpression inputTag(QStringLiteral("<input[^>]*type=\"file\"[^>]*>"));
+        static const QRegularExpression accept(QStringLiteral("accept=\"([^\"]*)\""));
+        QStringList captures;
+        bool plainPicker = false;
+        for (auto it = inputTag.globalMatch(QString::fromUtf8(page)); it.hasNext();) {
+            const QString tag = it.next().captured();
+            const QString kinds = accept.match(tag).captured(1);
+            if (tag.contains(QLatin1String("capture="))) {
+                QVERIFY2(!kinds.isEmpty() && !kinds.contains(QLatin1Char(',')), qPrintable(tag));
+                captures << kinds;
+            } else {
+                plainPicker = true;
+            }
+        }
+        QCOMPARE(captures, QStringList({QStringLiteral("image/*"), QStringLiteral("video/*")}));
+        QVERIFY(plainPicker);
     }
 
     void chunkedUploadWithoutOverwriting()

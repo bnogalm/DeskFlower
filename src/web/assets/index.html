@@ -19,13 +19,18 @@
 
   <main>
     <section class="actions">
+      <!-- One kind per camera button: with several in accept, phones open the gallery instead. -->
       <label class="button primary">
         <input id="pick-files" type="file" multiple hidden>
         Upload files
       </label>
       <label class="button">
-        <input id="take-photo" type="file" accept="image/*,video/*" capture="environment" hidden>
+        <input id="take-photo" type="file" accept="image/*" capture="environment" hidden>
         Take a photo
+      </label>
+      <label class="button">
+        <input id="record-video" type="file" accept="video/*" capture="environment" hidden>
+        Record a video
       </label>
     </section>
 

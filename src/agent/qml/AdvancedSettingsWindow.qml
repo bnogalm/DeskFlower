@@ -37,10 +37,11 @@ ApplicationWindow {
     readonly property bool changed: dataField.value !== (ports.data || defaultData)
                                     || discoveryField.value !== (ports.discovery || defaultDiscovery)
                                     || phoneField.value !== (ports.phone || defaultPhone)
-    readonly property bool pendingRestart: (ports.data && ports.dataInUse && ports.data !== ports.dataInUse)
-                                           || (ports.discovery && ports.discoveryInUse
-                                               && ports.discovery !== ports.discoveryInUse)
-                                           || (ports.phone && ports.phoneInUse && ports.phone !== ports.phoneInUse)
+    // Saved ports that the running service does not use yet (no ports known: false, not undefined).
+    readonly property bool pendingRestart: !!((ports.data && ports.dataInUse && ports.data !== ports.dataInUse)
+                                              || (ports.discovery && ports.discoveryInUse
+                                                  && ports.discovery !== ports.discoveryInUse)
+                                              || (ports.phone && ports.phoneInUse && ports.phone !== ports.phoneInUse))
 
     onVisibleChanged: if (visible) load()
 

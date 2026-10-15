@@ -122,7 +122,7 @@ public:
     Q_INVOKABLE void setLayout(const QVariantList &packs);
     // Asks this device's session helper and every paired device for fresh captures.
     Q_INVOKABLE void refreshThumbnails();
-    // Shared folder (phone uploads, files received through the clipboard).
+    // Shared folder (phone uploads; what phones see).
     Q_INVOKABLE void setSharedFolder(const QUrl &folder);
     Q_INVOKABLE void openSharedFolder();
     Q_INVOKABLE void setPhoneAccess(bool on);
@@ -150,6 +150,8 @@ signals:
     void thumbnailsChanged();
     void phoneUploaded(const QString &fileName);
     void serviceError(const QString &message);
+    // The folder chosen in setSharedFolder cannot be shared (a system folder, AppData...).
+    void sharedFolderRejected(const QString &path, const QString &reason);
     // Something the user may want to know (e.g. copied files received); problem: it went wrong.
     void notice(const QString &message, bool problem);
     void updateFinished(bool ok, const QString &message);

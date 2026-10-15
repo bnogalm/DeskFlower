@@ -28,7 +28,7 @@ public:
     // sessionToken: secret of the session helper started by this service (empty: none expected).
     ServiceController(Node *node, Workspace *workspace, InputController *input, ClipboardSync *clipboard,
                       FileTransfer *transfer, Settings *settings, web::PhoneServer *phone, RemoteView *remoteView, Updater *updater,
-                      std::function<QString()> sharedFolder,
+                      std::function<QString()> sharedFolder, std::function<QString()> receivedFolder,
                       const QString &instance, bool serviceMode, const QByteArray &sessionToken,
                       QObject *parent = nullptr);
     bool listen(QString *error);
@@ -64,6 +64,7 @@ private:
     RemoteView *m_remoteView;
     Updater *m_updater;
     std::function<QString()> m_sharedFolder;
+    std::function<QString()> m_receivedFolder; // copied and dragged files (platform::receivedFolder)
     QString m_phoneError;
     QStringList m_phoneUrls;
     QByteArray m_sessionToken;

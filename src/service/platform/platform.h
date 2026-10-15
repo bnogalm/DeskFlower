@@ -47,15 +47,41 @@ bool separatesUsers(bool serviceMode);
 // is (or when the service does not separate users).
 QString interactiveUserId(bool serviceMode);
 
-// Whether `path` may be the shared folder. Windows service mode: inside the console user's home,
-// and reached without links, because the service writes and serves files there as LocalSystem.
-// Otherwise any absolute path (the service runs as the user). `why` says what is wrong.
+// Whether `path` may be the shared folder (sharedFolderProblem). Windows service mode: inside the
+// console user's home, and reached without links, because the service writes and serves files there
+// as LocalSystem. Otherwise also outside the home folder (the service runs as the user), but never a
+// system folder. `why` says what is wrong.
 bool isAllowedSharedFolder(const QString &path, bool serviceMode, QString *why = nullptr);
+// The rule behind it, without the file system: why `path` may not be shared by the user whose
+// home folder is `home` (empty if it may). Never the whole home folder, a hidden folder, AppData
+// (Windows) or Library (macOS), a whole drive or a system folder; with insideHomeOnly, nothing
+// outside `home`.
+QString sharedFolderProblem(const QString &path, const QString &home, bool insideHomeOnly);
 
 // File access with the console user's rights for as long as the returned guard lives. Windows
 // service mode: impersonates that user on the calling thread; null if nobody is logged on (or it
 // failed). Elsewhere a guard that does nothing: the service already runs as the user.
+// Nested guards put back what the thread was before. Looking up the user (interactiveUserHome,
+// interactiveUserId) works while acting as the user: it is done with the service's own rights.
 std::shared_ptr<void> actAsInteractiveUser(bool serviceMode);
+
+// The shared folder (phone uploads; what phones see): `chosen` if it is
+// allowed (isAllowedSharedFolder), else <console user's home>/Deskflower, else `fallback` when
+// nobody is signed in. Created with the console user's rights.
+QString sharedFolder(const QString &chosen, const QString &fallback, bool serviceMode);
+
+// Where files received from paired devices wait (copied files: Clipboard/, dragged files:
+// Dragged/), apart from the shared folder so that phones never see them: a hidden folder of the
+// console user (Windows: <home>/AppData/Local/Deskflower/Received; Linux: ~/.cache/deskflower/received;
+// macOS: ~/Library/Caches/Deskflower/Received), else `fallback` when nobody is signed in. Created
+// with the console user's rights.
+QString receivedFolder(const QString &fallback, bool serviceMode);
+
+// Tests: where the console user's token comes from in Windows service mode (by default
+// WTSQueryUserToken, which only works with the service's own rights). The source returns a token
+// handle the caller closes, or null. An empty function puts the default back.
+using UserTokenSource = std::function<void *()>;
+void setUserTokenSourceForTests(UserTokenSource source);
 
 // Restricts a directory to the account running the process: on Windows LocalSystem and
 // Administrators in service mode, otherwise the owner (the current user). False if that failed, or

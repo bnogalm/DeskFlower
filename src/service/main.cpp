@@ -135,26 +135,21 @@ int runNode(int argc, char **argv, bool serviceMode)
                      });
     df::FileTransfer transfer(&node);
     // Shared folder: chosen in the agent, or <user home>/Deskflower (looked up each time: users log
-    // on and off). Phone uploads and files received through the clipboard go there.
+    // on and off). Phone uploads go there and phones see it.
     // A chosen folder must still be acceptable (inside the signed-in user's folder; see
     // isAllowedSharedFolder), and it is created with that user's rights.
     auto sharedFolder = [&settings, serviceMode, configDir] {
-        QString folder = settings.value(QStringLiteral("sharedFolder")).toString();
-        if (!folder.isEmpty() && !df::platform::isAllowedSharedFolder(folder, serviceMode))
-            folder.clear();
-        if (folder.isEmpty()) {
-            const QString home = df::platform::interactiveUserHome(serviceMode);
-            folder = home.isEmpty() ? QDir(configDir).filePath(QStringLiteral("Shared"))
-                                    : QDir(home).filePath(QStringLiteral("Deskflower"));
-        }
-        if (const auto asUser = df::platform::actAsInteractiveUser(serviceMode))
-            QDir().mkpath(folder);
-        return folder;
+        return df::platform::sharedFolder(settings.value(QStringLiteral("sharedFolder")).toString(),
+                                          QDir(configDir).filePath(QStringLiteral("Shared")), serviceMode);
     };
     // The clipboard follows the shared cursor (ClipboardSync).
     df::ClipboardSync::Presence presence{[&input](qint64 graceMs) { return input.cursorHere(graceMs); },
                                          [&workspace] { return workspace.masterId(); }};
-    df::ClipboardSync clipboard(&node, &transfer, &settings, presence, sharedFolder);
+    // Files received from paired devices wait apart, where phones do not see them.
+    auto receivedFolder = [serviceMode, configDir] {
+        return df::platform::receivedFolder(QDir(configDir).filePath(QStringLiteral("Received")), serviceMode);
+    };
+    df::ClipboardSync clipboard(&node, &transfer, &settings, presence, receivedFolder);
     QObject::connect(&input, &df::InputController::cursorMoved, &clipboard, &df::ClipboardSync::cursorMoved);
     df::web::PhoneServer::Options phoneOptions;
     phoneOptions.configDir = configDir;
@@ -191,7 +186,8 @@ int runNode(int argc, char **argv, bool serviceMode)
     // agreed through DESKFLOWER_SESSION_TOKEN.
     const QByteArray sessionToken = launcher ? launcher->token() : qgetenv("DESKFLOWER_SESSION_TOKEN");
     df::ServiceController controller(&node, &workspace, &input, &clipboard, &transfer, &settings, &phone, &remoteView,
-                                     &updater, sharedFolder, instance, serviceMode, sessionToken);
+                                     &updater, sharedFolder, receivedFolder, instance, serviceMode,
+                                     sessionToken);
     if (!controller.listen(&error)) {
         qCritical().noquote() << error;
         return 1;
