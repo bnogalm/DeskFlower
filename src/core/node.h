@@ -79,9 +79,14 @@ public:
     // Never called: pairings are not tied to users (the node runs as one user).
     void setLocalUser(const QString &user);
 
-    // Local grant letting a trusted peer view this screen without a prompt (persisted).
+    // Local grant letting a trusted peer view this screen without a prompt (persisted). Given by
+    // the prompt ("Always allow") or in advance by the local user.
     bool isViewAllowed(const QByteArray &peerId) const;
     void setViewAllowed(const QByteArray &peerId, bool on);
+    // Remote view at all ("remoteView" setting, default on). Off: nobody may view this screen
+    // (isViewAllowed is false for everyone) and this device views nobody's; grants are kept.
+    void setRemoteViewEnabled(bool on);
+    bool isRemoteViewEnabled() const { return m_remoteViewEnabled; }
 
     // Announces the signed update package this device serves to paired peers (in the hello).
     void setUpdateOffer(const QString &version, const QString &platform);
@@ -157,6 +162,7 @@ private:
     std::map<quint32, QByteArray> m_indexToPeer;
     // Pairings tied to users (setLocalUser).
     bool isUsable(const QByteArray &peerId) const;
+    bool isViewGranted(const QByteArray &peerId) const; // the stored grant, remote view on or off
     void adoptUnownedPeers();
 
     // Unauthenticated traffic is rate limited, so that a flood costs little CPU and memory.
@@ -176,6 +182,7 @@ private:
     std::map<QByteArray, int> m_acceptedStreams;     // authenticated, by peer
 
     bool m_usersSeparate = false;
+    bool m_remoteViewEnabled = true;
     QString m_localUser;
     QByteArray m_bootId;
     bool m_exploring = false;

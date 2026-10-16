@@ -34,6 +34,8 @@ class Backend : public QObject
     // Start the agent at every sign-in (the service manages it; not supported everywhere).
     Q_PROPERTY(bool autostartSupported READ autostartSupported NOTIFY stateChanged)
     Q_PROPERTY(bool autostart READ autostart NOTIFY stateChanged)
+    // Remote view at all on this device: off, nobody views this screen and it views nobody's.
+    Q_PROPERTY(bool remoteViewEnabled READ remoteViewEnabled NOTIFY stateChanged)
     Q_PROPERTY(QVariantList trustedPeers READ trustedPeers NOTIFY stateChanged)
     Q_PROPERTY(QVariantList nearbyPeers READ nearbyPeers NOTIFY stateChanged)
     Q_PROPERTY(QVariantList devices READ devices NOTIFY stateChanged)
@@ -77,6 +79,7 @@ public:
     bool clipboardSharing() const { return m_clipboardSharing; }
     bool autostartSupported() const { return m_autostartSupported; }
     bool autostart() const { return m_autostart; }
+    bool remoteViewEnabled() const { return m_remoteViewEnabled; }
     QVariantList trustedPeers() const { return m_trusted; }
     QVariantList nearbyPeers() const { return m_nearby; }
     QVariantList devices() const { return m_devices; }
@@ -121,6 +124,7 @@ public:
     Q_INVOKABLE void setRemoteView(const QString &deviceId, bool on);
     Q_INVOKABLE void setClipboardSharing(bool on);
     Q_INVOKABLE void setAutostart(bool on);
+    Q_INVOKABLE void setRemoteViewEnabled(bool on);
     // packs: [{id, x, y}] pack offsets in the shared plane.
     Q_INVOKABLE void setLayout(const QVariantList &packs);
     // Asks this device's session helper and every paired device for fresh captures.
@@ -197,6 +201,7 @@ private:
     QStringList fetchFromService(const QString &cmd, QCborMap args, const QString &replyEvent, QString *error) const;
     bool m_autostartSupported = false;
     bool m_autostart = false;
+    bool m_remoteViewEnabled = true;
     QVariantList m_trusted;
     QVariantList m_nearby;
     QVariantList m_devices;

@@ -396,6 +396,108 @@ private slots:
         QTRY_COMPARE(failed.size(), 1);
     }
 
+    void remoteViewOffRefusesEveryoneAndKeepsTheGrants()
+    {
+        ViewPair p;
+        QVERIFY(p.setup());
+        p.b->setViewAllowed(p.a->id(), true); // given in advance
+        QSignalSpy asked(p.source.get(), &RemoteView::authorizationRequested);
+        QSignalSpy requested(p.source.get(), &RemoteView::captureRequested);
+        QSignalSpy stopped(p.source.get(), &RemoteView::captureStopped);
+        QSignalSpy failed(p.viewer.get(), &RemoteView::viewingFailed);
+        p.viewer->startViewing(p.b->id(), QSize(1920, 1080));
+        QTRY_COMPARE(requested.size(), 1);
+        QCOMPARE(asked.size(), 0);
+
+        // Turned off: the live view ends, and so does a new request, even with the grant.
+        p.b->setRemoteViewEnabled(false);
+        QTRY_COMPARE(stopped.size(), 1);
+        QTRY_COMPARE(failed.size(), 1);
+        QVERIFY2(lastReason(failed).contains("remote view is off"), qPrintable(lastReason(failed)));
+        QVERIFY(!p.b->isViewAllowed(p.a->id()));
+        p.viewer->startViewing(p.b->id(), QSize(1920, 1080));
+        QTRY_COMPARE(failed.size(), 2);
+        QVERIFY2(lastReason(failed).contains("remote view is off"), qPrintable(lastReason(failed)));
+        QCOMPARE(requested.size(), 1);
+        QCOMPARE(asked.size(), 0);
+        bool kept = false;
+        for (const PeerView &peer : p.b->peers())
+            kept |= peer.id == p.a->id() && peer.allowView;
+        QVERIFY(kept);
+
+        // Back on: the grant still holds.
+        p.b->setRemoteViewEnabled(true);
+        p.viewer->startViewing(p.b->id(), QSize(1920, 1080));
+        QTRY_COMPARE(requested.size(), 2);
+        QCOMPARE(asked.size(), 0);
+    }
+
+    void viewStartsOnTheScreenBeyondTheEdge()
+    {
+        QTemporaryDir dirA, dirB;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        Workspace wa(a.get(), dirA.path()), wb(b.get(), dirB.path());
+        wa.setLocalScreens({ScreenInfo{"a1", "", QRect(0, 0, 1920, 1080), 1, true}});
+        // B: a secondary screen on the left, next to A, and its primary one beyond it.
+        wb.setLocalScreens({ScreenInfo{"b2", "", QRect(0, 0, 1920, 1080), 1, false},
+                            ScreenInfo{"b1", "", QRect(1920, 0, 1920, 1080), 1, true}});
+        QVERIFY(test::pairNodes(*a, *b));
+        QTRY_COMPARE(wa.screens(b->id()).size(), 2);
+        wa.setLayout({{a->id(), {0, 0}}, {b->id(), {1920, 0}}});
+        wa.setRemoteView(b->id(), true);
+        wa.setSharing(true);
+        QTRY_COMPARE(wb.masterId(), a->id());
+
+        InputController ia(a.get(), &wa);
+        QSignalSpy viewRequested(&ia, &InputController::viewRequested);
+        ia.sessionConnected();
+        ia.handleSessionMessage(cmd("edge", {{"s", int(Side::Right)}, {"x", 1919}, {"y", 540}}));
+        QVERIFY(ia.isViewing());
+        QCOMPARE(viewRequested.size(), 1);
+        QCOMPARE(viewRequested.first().at(2).toRect(), QRect(0, 0, 1920, 1080)); // not the primary one
+        QCOMPARE(ia.cursor().x(), 1); // one pixel inside, as on any crossing
+
+        // Further right: the primary one; back left twice: home.
+        QSignalSpy screenChanged(&ia, &InputController::viewScreenChanged);
+        ia.handleSessionMessage(cmd("mm", {{"x", 2000}, {"y", 0}}));
+        QCOMPARE(screenChanged.size(), 1);
+        QCOMPARE(screenChanged.first().at(1).toRect(), QRect(1920, 0, 1920, 1080));
+        ia.handleSessionMessage(cmd("mm", {{"x", -2000}, {"y", 0}}));
+        QCOMPARE(screenChanged.size(), 2);
+        ia.handleSessionMessage(cmd("mm", {{"x", -2000}, {"y", 0}}));
+        QVERIFY(!ia.isViewing());
+        QCOMPARE(ia.activeDevice(), a->id());
+    }
+
+    void remoteViewOffHereEntersFlaggedDevicesAsUsual()
+    {
+        QTemporaryDir dirA, dirB;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        Workspace wa(a.get(), dirA.path()), wb(b.get(), dirB.path());
+        wa.setLocalScreens({ScreenInfo{"a1", "", QRect(0, 0, 1920, 1080), 1, true}});
+        wb.setLocalScreens({ScreenInfo{"b1", "", QRect(0, 0, 1920, 1080), 1, true}});
+        QVERIFY(test::pairNodes(*a, *b));
+        QTRY_COMPARE(wa.screens(b->id()).size(), 1);
+        wa.setLayout({{a->id(), {0, 0}}, {b->id(), {1920, 0}}});
+        wa.setRemoteView(b->id(), true);
+        wa.setSharing(true);
+        QTRY_COMPARE(wb.masterId(), a->id());
+
+        a->setRemoteViewEnabled(false);
+        InputController ia(a.get(), &wa), ib(b.get(), &wb);
+        QSignalSpy viewRequested(&ia, &InputController::viewRequested);
+        QSignalSpy toB(&ib, &InputController::toSession);
+        ia.sessionConnected();
+        ib.sessionConnected();
+        ia.handleSessionMessage(cmd("edge", {{"s", int(Side::Right)}, {"x", 1919}, {"y", 540}}));
+        QVERIFY(!ia.isViewing());
+        QCOMPARE(viewRequested.size(), 0);
+        QCOMPARE(ia.activeDevice(), b->id());
+        QTRY_VERIFY(!lastEvent(toB, "mabs").isEmpty()); // the cursor really moved there
+    }
+
     void unpairStopsTheStream()
     {
         ViewPair p;

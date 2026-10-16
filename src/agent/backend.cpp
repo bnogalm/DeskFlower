@@ -229,6 +229,13 @@ void Backend::setAutostart(bool on)
     command(QStringLiteral("setAgentAutostart"), a);
 }
 
+void Backend::setRemoteViewEnabled(bool on)
+{
+    QCborMap a;
+    a.insert(QStringLiteral("on"), on);
+    command(QStringLiteral("setRemoteViewEnabled"), a);
+}
+
 void Backend::setClipboardSharing(bool on)
 {
     QCborMap a;
@@ -404,6 +411,7 @@ void Backend::onMessage(const QCborMap &msg)
         m_clipboardSharing = msg.value(QStringLiteral("clipboard")).toBool();
         m_autostartSupported = msg.value(QStringLiteral("autostartSupported")).toBool();
         m_autostart = msg.value(QStringLiteral("autostart")).toBool();
+        m_remoteViewEnabled = msg.value(QStringLiteral("remoteViewEnabled")).toBool(true);
         m_files = msg.value(QStringLiteral("files")).toMap().toVariantMap();
         m_screenViewerName.clear();
         if (msg.contains(QStringLiteral("screenViewer"))) {

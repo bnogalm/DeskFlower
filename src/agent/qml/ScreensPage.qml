@@ -208,6 +208,7 @@ Item {
                         anchors.left: parent.left
                         anchors.leftMargin: -8 // the indicator's own padding
                         text: qsTr("Remote view")
+                        enabled: page.backend.remoteViewEnabled
                         checked: pack.modelData.remoteView === true
                         onToggled: {
                             page.backend.setRemoteView(pack.modelData.id, checked)
@@ -215,7 +216,9 @@ Item {
                         }
                         ToolTip.visible: hovered
                         ToolTip.delay: 500
-                        ToolTip.text: qsTr("Crossing into this device shows its screens full screen on your monitor, one at a time, instead of moving the cursor to them.")
+                        ToolTip.text: page.backend.remoteViewEnabled
+                                      ? qsTr("Crossing into this device shows its screens full screen on your monitor, one at a time, instead of moving the cursor to them.")
+                                      : qsTr("Remote view is off on this device (Advanced settings).")
                     }
                     Label {
                         id: masterLabel

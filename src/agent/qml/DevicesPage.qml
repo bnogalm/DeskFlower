@@ -34,6 +34,7 @@ ScrollView {
                 Layout.fillWidth: true
                 actionText: qsTr("Forget")
                 showViewSwitch: true
+                viewSwitchEnabled: page.backend.remoteViewEnabled
                 showUpdate: true
                 updatesConfigured: page.backend.updatesConfigured
                 updatesSupported: page.backend.updatesSupported

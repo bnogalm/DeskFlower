@@ -299,6 +299,7 @@ ServiceController::ServiceController(Node *node, Workspace *workspace, InputCont
     });
     if (m_settings->value(QStringLiteral("phoneAccess")).toBool())
         QTimer::singleShot(0, this, [this] { setPhoneAccess(true); });
+    m_node->setRemoteViewEnabled(m_settings->value(QStringLiteral("remoteView"), true).toBool());
 
     connect(m_clipboard, &ClipboardSync::filesNotice, this, [this](const QString &text, bool problem) {
         QCborMap ev = makeEvent(QStringLiteral("notice"));
@@ -587,12 +588,22 @@ void ServiceController::handleCommand(ipc::Connection *conn, const QCborMap &msg
             conn->send(ev);
         }
     } else if (cmd == QLatin1String("setViewAllowed")) {
-        // Revoke only. The grant comes from answering the prompt, while the requester's input is
-        // blocked; here the master could flip the switch itself through the shared keyboard and mouse.
-        if (!msg.value(QStringLiteral("on")).toBool()) {
+        // Granted in advance too: a paired master already has this keyboard and mouse. While a
+        // prompt is open its input is blocked, so only the local user can grant it from here.
+        if (msg.value(QStringLiteral("on")).toBool()) {
+            m_node->setViewAllowed(id, true);
+            m_remoteView->answer(id, RemoteView::Decision::Always); // its open prompt, if any
+        } else {
             m_node->setViewAllowed(id, false);
             m_remoteView->revoke(id);
         }
+    } else if (cmd == QLatin1String("setRemoteViewEnabled")) {
+        const bool on = msg.value(QStringLiteral("on")).toBool();
+        m_settings->setValue(QStringLiteral("remoteView"), on);
+        m_node->setRemoteViewEnabled(on); // ends a view of this screen
+        if (!on && m_input->isViewing())
+            m_input->cancelView(); // and of another one
+        scheduleState();
     }
 }
 
@@ -785,6 +796,7 @@ QCborMap ServiceController::stateEvent() const
     ev.insert(QStringLiteral("clipboard"), m_clipboard->isEnabled());
     ev.insert(QStringLiteral("autostartSupported"), platform::agentAutostartSupported(m_serviceMode));
     ev.insert(QStringLiteral("autostart"), m_settings->value(QStringLiteral("agentAutostart"), true).toBool());
+    ev.insert(QStringLiteral("remoteViewEnabled"), m_node->isRemoteViewEnabled());
     ev.insert(QStringLiteral("files"), filesState());
     ev.insert(QStringLiteral("updates"), updatesState());
     // Configured (used from the next start) and in use now.

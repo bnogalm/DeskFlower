@@ -25,14 +25,16 @@
 // device has no screens left, the input comes back to the master.
 //
 // Remote view (devices flagged in the layout): instead of moving to the device's screens, its
-// screens are shown full screen, one at a time, on the local monitor where the edge was crossed
-// (the primary one first). Pushing the cursor past an edge of the shown screen towards another
+// screens are shown full screen, one at a time, on the local monitor where the edge was crossed,
+// starting with the one the layout puts beyond that edge. Pushing the cursor past an edge of the shown screen towards another
 // screen of that device shows that one; leaving through the side it came in returns home. Extra
 // helper events: viewOpen {device, x, y, w, h (local monitor), rw, rh (remote screen)},
 // viewScreen {rw, rh} (another remote screen is shown), viewCursor {x, y} (relative to the remote
 // screen), viewClose (the service adds viewStatus {device, state, text}). Nothing reaches the remote device (not even in.enter) until
 // its user accepts the view (setViewAccepted), so nobody can click its approval prompt blindly.
 // A failed view (cancelView) returns home and the same device is not entered again for a moment.
+// With remote view off on this device (Node::isRemoteViewEnabled) flagged devices are entered as
+// usual.
 //
 // Dragging files between devices: crossing an edge with the left button held (helper: edge {lb}
 // for the master's own button, the buttons forwarded for a remote device) holds the crossing back
@@ -123,7 +125,9 @@ private:
     void refuseInput(const QByteArray &master);
     bool isMaster() const;
     void enter(const Crossing &target, Side side);
-    void enterView(const QByteArray &device, QPoint edgePoint, Side side);
+    // Crossing into `device` shows its screens: flagged in the layout and remote view on here.
+    bool viewsDevice(const QByteArray &device) const;
+    void enterView(const Crossing &target, QPoint edgePoint, Side side);
     void moveInView(int dx, int dy);
     // Remote view: the device's screen beyond the edge of `r` that a move to `next` crosses.
     QRect neighbourScreen(const QRect &r, QPoint next) const;

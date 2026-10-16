@@ -306,7 +306,7 @@ void Workspace::onPeersChanged()
     // of newly granted ones.
     QSet<QByteArray> granted;
     for (const PeerView &p : m_node->peers()) {
-        if (p.trusted && p.allowView)
+        if (p.trusted && m_node->isViewAllowed(p.id))
             granted.insert(p.id);
     }
     for (const QByteArray &id : m_viewGrants - granted) {

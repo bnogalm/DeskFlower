@@ -200,13 +200,20 @@ Item {
 
                     readonly property color petal: layer.on ? layer.spec.color : "transparent"
 
-                    // A slow turn of its own.
-                    RotationAnimation on rotation {
+                    // A slow twist one way and back (a full turn looks like a wheel); neighbours
+                    // twist the other way and at their own pace.
+                    readonly property real twist: (layer.index % 2 ? -1 : 1) * (14 + layer.index % 3 * 4)
+                    SequentialAnimation on rotation {
                         running: root.running && layer.on
                         loops: Animation.Infinite
-                        from: 0
-                        to: (layer.index % 2 ? -360 : 360)
-                        duration: 24000 + layer.index * 700
+                        NumberAnimation {
+                            from: -flower.twist; to: flower.twist
+                            duration: 5200 + layer.index * 450; easing.type: Easing.InOutSine
+                        }
+                        NumberAnimation {
+                            from: flower.twist; to: -flower.twist
+                            duration: 5200 + layer.index * 450; easing.type: Easing.InOutSine
+                        }
                     }
 
                     Repeater {

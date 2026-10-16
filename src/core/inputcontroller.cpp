@@ -190,17 +190,17 @@ void InputController::handleSessionMessage(const QCborMap &msg)
         if (m_pendingCrossing)
             return; // waiting to know what is dragged
         if (msg.value(QStringLiteral("lb")).toBool() && !m_dragging) {
-            const bool view = m_workspace->isRemoteView(target->device);
+            const bool view = viewsDevice(target->device);
             if (!view || nowMs() >= m_viewRetryAfter.value(target->device, -1)) {
                 beginCatch(self, at, PendingCrossing{false, *target, side, at, view});
                 return;
             }
         }
-        if (m_workspace->isRemoteView(target->device)) {
+        if (viewsDevice(target->device)) {
             // A cursor resting on the edge would otherwise ask again and again after a failure.
             if (nowMs() < m_viewRetryAfter.value(target->device, -1))
                 return;
-            enterView(target->device, at, side);
+            enterView(*target, at, side);
         }
         else
             enter(*target, side);
@@ -296,10 +296,19 @@ void InputController::enter(const Crossing &target, Side side)
         emit cursorMoved(previous, m_active);
 }
 
-void InputController::enterView(const QByteArray &device, QPoint edgePoint, Side side)
+bool InputController::viewsDevice(const QByteArray &device) const
 {
+    return m_workspace->isRemoteView(device) && m_node->isRemoteViewEnabled();
+}
+
+void InputController::enterView(const Crossing &target, QPoint edgePoint, Side side)
+{
+    const QByteArray &device = target.device;
     const QRect monitor = m_router.screenAt(m_node->id(), edgePoint);
-    const QRect remote = m_router.primaryRect(device);
+    // The screen the layout puts beyond the edge (the primary one if it cannot tell).
+    QRect remote = m_router.screenAt(device, target.point);
+    if (remote.isEmpty())
+        remote = m_router.primaryRect(device);
     if (monitor.isEmpty() || remote.isEmpty())
         return;
     // Same relative position along the edge: the remote screen replaces the local monitor.
@@ -577,7 +586,7 @@ void InputController::finishCatch(bool files)
     if (crossing.toLocal)
         returnLocal(crossing.point, true);
     else if (crossing.view && m_node->isConnected(crossing.target.device))
-        enterView(crossing.target.device, crossing.point, crossing.side);
+        enterView(crossing.target, crossing.point, crossing.side);
     else if (m_node->isConnected(crossing.target.device))
         enter(crossing.target, crossing.side);
     if (files)

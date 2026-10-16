@@ -11,6 +11,7 @@ ItemDelegate {
     property bool actionEnabled: true
     property string hint
     property bool showViewSwitch: false  // paired peers: may view this screen without asking
+    property bool viewSwitchEnabled: true
     // Paired peers offering a newer signed package (peer.update). updateState: the update in
     // progress from this peer ("", downloading, verifying, installing).
     property bool showUpdate: false
@@ -67,10 +68,11 @@ ItemDelegate {
                 opacity: 0.5
             }
             Switch {
-                // Revoke only: the grant comes from the prompt ("Always allow"), which the
-                // requester cannot answer remotely.
-                visible: root.showViewSwitch && !!root.peer.allowView
-                text: qsTr("May view this screen without asking")
+                // Given in advance or by the prompt ("Always allow"); taken back here.
+                visible: root.showViewSwitch
+                enabled: root.viewSwitchEnabled
+                text: root.viewSwitchEnabled ? qsTr("May view this screen without asking")
+                                             : qsTr("May view this screen without asking (remote view is off)")
                 font.pixelSize: 12
                 // Only the horizontal padding goes: without the vertical one the Material indicator
                 // is taller than the control and covers the labels above.

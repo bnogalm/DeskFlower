@@ -12,8 +12,8 @@
 //                                 status {s: "accepted"}          capture starts
 //                                 refused {c, r} / error {c, r}   then the stream closes
 //                                 frame {s, w, h, full, n}, then n tile frames, then fend {s}.
-//   Codes (c): notMaster, noUser, denied, timeout, busy, revoked, stopped, capture, stalled; r is a
-//   hint.
+//   Codes (c): notMaster, noUser, denied, timeout, busy, revoked, disabled (remote view is off
+//   there), stopped, capture, stalled; r is a hint.
 // Stream frames start with a kind byte: 1 = CBOR control, 3 = tile
 // ([x u16][y u16][w u16][h u16] + JPEG, little-endian).
 //
@@ -22,7 +22,8 @@
 //
 // A device only streams its screen to the current master, only while that peer is paired, and only
 // with its local user's consent: either a persisted grant (Node::isViewAllowed) or an answer to
-// authorizationRequested. Without a local user to ask, requests are refused.
+// authorizationRequested. Without a local user to ask, or with remote view turned off
+// (Node::isRemoteViewEnabled), requests are refused.
 //
 // The viewer reports its progress through viewStateChanged and gives up with a reason (watchdog)
 // when the source stops answering, so it never waits forever.

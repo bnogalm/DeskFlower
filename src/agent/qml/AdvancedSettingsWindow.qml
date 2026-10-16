@@ -3,8 +3,9 @@ import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
 
-// Advanced settings, in a window of their own: the network ports. The service saves them and uses
-// them from its next start, so saving offers to restart it.
+// Advanced settings, in a window of their own: remote view at all (applied at once) and the network
+// ports. The service saves the ports and uses them from its next start, so saving offers to
+// restart it.
 ApplicationWindow {
     id: root
 
@@ -97,6 +98,35 @@ ApplicationWindow {
         ColumnLayout {
             width: parent.width
             spacing: 12
+
+            Label {
+                text: qsTr("Remote view")
+                font.pixelSize: 18
+                font.bold: true
+                Layout.topMargin: 16
+                Layout.leftMargin: 16
+            }
+            Switch {
+                text: qsTr("Allow remote view")
+                enabled: root.backend.serviceConnected
+                checked: root.backend.remoteViewEnabled
+                onToggled: {
+                    root.backend.setRemoteViewEnabled(checked)
+                    checked = Qt.binding(() => root.backend.remoteViewEnabled)
+                }
+                Layout.leftMargin: 8
+            }
+            Label {
+                text: qsTr("Off: no paired device can see this screen or its previews, even those allowed to view it "
+                           + "without asking, and this device shows nobody else's screen (crossing into a device "
+                           + "marked \"Remote view\" moves the cursor there as usual). The permissions given are kept "
+                           + "for when it is turned back on.")
+                wrapMode: Text.WordWrap
+                opacity: 0.8
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+            }
 
             Label {
                 text: qsTr("Network ports")

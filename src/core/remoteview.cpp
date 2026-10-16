@@ -239,6 +239,8 @@ QString RemoteView::textFor(const QString &code, const QString &hint) const
         return QStringLiteral("%1 is busy with another screen view request").arg(name);
     if (code == QLatin1String("revoked"))
         return QStringLiteral("Permission to view %1 was revoked").arg(name);
+    if (code == QLatin1String("disabled"))
+        return QStringLiteral("%1 does not share its screen (remote view is off in its advanced settings)").arg(name);
     if (code == QLatin1String("stopped"))
         return QStringLiteral("%1 stopped showing its screen").arg(name);
     if (code == QLatin1String("capture"))
@@ -362,6 +364,11 @@ void RemoteView::onViewRequest(SecureStream *stream, QSize size, const QRect &sc
         // The stream may predate an unpair (accepted streams outlive it): never prompt for it.
         qCWarning(lcView) << "Screen view refused: the requester is no longer paired";
         sendEnd(stream, QStringLiteral("refused"), QStringLiteral("revoked"), QStringLiteral("Not paired"));
+        return;
+    }
+    if (!m_node->isRemoteViewEnabled()) {
+        qCInfo(lcView) << "Screen view refused: remote view is off on this device";
+        sendEnd(stream, QStringLiteral("refused"), QStringLiteral("disabled"), QStringLiteral("Remote view is off"));
         return;
     }
     if (!m_userPresent) {
@@ -554,7 +561,13 @@ QByteArray RemoteView::streamingTo() const { return m_sourceStream ? m_sourceStr
 
 void RemoteView::recheck()
 {
-    // The master changed or a peer was unpaired: whatever is no longer allowed ends now.
+    // The master changed, a peer was unpaired or remote view was turned off: whatever is no longer
+    // allowed ends now.
+    if (!m_node->isRemoteViewEnabled()) {
+        dropPending(QStringLiteral("disabled"), QStringLiteral("Remote view is off"));
+        endStream(QStringLiteral("disabled"), QStringLiteral("Remote view is off"));
+        return;
+    }
     const QByteArray master = m_workspace->masterId();
     if (m_pending) {
         const QByteArray peer = m_pending->peer;

@@ -291,7 +291,7 @@ QList<PeerView> Node::peers() const
         v.address = p->addr;
         v.port = p->port;
         v.trusted = trusted;
-        v.allowView = isViewAllowed(id);
+        v.allowView = isViewGranted(id);
         v.otherUser = trusted && !isUsable(id);
         v.connected = p->connected;
         v.exploring = p->exploring && p->lastSeen >= 0 && now - p->lastSeen < kUntrustedExpiryMs;
@@ -312,18 +312,28 @@ bool Node::isConnected(const QByteArray &peerId) const
     return it != m_peers.end() && it->second->connected;
 }
 
-bool Node::isViewAllowed(const QByteArray &peerId) const
+bool Node::isViewGranted(const QByteArray &peerId) const
 {
     const TrustedPeer *trusted = m_store.find(peerId);
     return trusted && trusted->allowView;
 }
 
+bool Node::isViewAllowed(const QByteArray &peerId) const { return m_remoteViewEnabled && isViewGranted(peerId); }
+
 void Node::setViewAllowed(const QByteArray &peerId, bool on)
 {
-    if (!m_store.contains(peerId) || !isUsable(peerId) || isViewAllowed(peerId) == on)
+    if (!m_store.contains(peerId) || !isUsable(peerId) || isViewGranted(peerId) == on)
         return;
     m_store.setAllowView(peerId, on);
     emit peersChanged();
+}
+
+void Node::setRemoteViewEnabled(bool on)
+{
+    if (m_remoteViewEnabled == on)
+        return;
+    m_remoteViewEnabled = on;
+    emit peersChanged(); // what isViewAllowed answers changed
 }
 
 void Node::addManualPeer(const QHostAddress &addr, quint16 port)

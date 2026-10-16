@@ -160,7 +160,8 @@ be arranged.
 
 A paired device can be flagged *Remote view* in the *Screens* tab. Crossing into it no longer
 moves the cursor to its own screens. Its **screens are shown full screen, one at a time, on the
-local monitor** where the edge was crossed (the primary one first), and you control it as in a
+local monitor** where the edge was crossed (first the one the layout puts beyond that edge), and you
+control it as in a
 remote desktop session.
 
 - **Cursor:** it enters at the same relative position along the edge. Pushing it past an edge of the
@@ -182,10 +183,17 @@ remote desktop session.
     and after a Deny the same device is refused for 10 seconds. The viewer forwards no keyboard or
     mouse input until the request is accepted, and the shown device ignores input from the
     requester while it asks, so nobody can click the prompt remotely.
-  - *Always allow* is stored in `peers.json` (`"allowView": true`) and can only be given from that
-    prompt. Revoke it with the *May view this screen without asking* switch in the *Devices* tab
-    (shown only while the grant exists; this also ends a running view), or by forgetting the
-    device. Pairing again starts without the grant, and an unpaired device is refused.
+  - *Always allow* is stored in `peers.json` (`"allowView": true`). It can also be given in advance
+    with the *May view this screen without asking* switch of that device in the *Devices* tab (a
+    paired master already has this keyboard and mouse; while the prompt is open its input is
+    ignored, so turning the switch on then answers *Always allow* locally). Turning the switch off
+    revokes it and ends a running view; forgetting the device does too. Pairing again starts
+    without the grant, and an unpaired device is refused.
+  - **Off entirely:** *Allow remote view* in *Advanced settings* (`"remoteView": false` in
+    `settings.json`, applied at once). Off, every request is refused (the viewer reads "remote view
+    is off"), a running view and the thumbnails end, even for devices with the grant, and this
+    device shows nobody else's screen: crossing into a device flagged *Remote view* moves the cursor
+    there as usual. The grants are kept for when it is turned back on.
   - Somebody must be signed in on the shown device with the agent running to answer; otherwise the
     request is refused. Signing out (or switching user) ends a running view: consent does not
     carry over to another session.
