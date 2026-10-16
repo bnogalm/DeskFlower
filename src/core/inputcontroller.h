@@ -8,6 +8,7 @@
 //                         mb {b, d}        button (1 left, 2 right, 3 middle, 4 x1, 5 x2), d = down
 //                         mw {x, y}        wheel (120 units per notch)
 //                         key {s, d}       PS/2 set-1 scancode (0xE0xx for extended keys)
+//                         captureLost {x, y}  capture ended on its own (input is local again)
 //   controller -> helper: config {master}  capture {on, x, y}  releaseAll  ping
 //                         mabs {x, y}  mb {b, d, x, y}  mw {x, y}  key {s, d}  hideCursor
 //
@@ -16,7 +17,12 @@
 // Between devices (reliable channel): in.enter {x, y}, in.leave, in.btn {b, d, x, y},
 // in.wheel {x, y}, in.key {s, d}. Pointer motion goes as unreliable datagrams
 // [kind u8 = 1][seq u32][x i32][y i32] (latest wins).
-// A device only obeys input coming from the current master.
+// A device only obeys input coming from the current master. One that cannot take it (nothing runs
+// in its session to move its cursor) answers in.refused, and the master takes its input back.
+//
+// There is always a way home: when the screens change while the cursor is on another device (a
+// monitor goes off, a resolution or the layout changes) and no edge leads back any more, or that
+// device has no screens left, the input comes back to the master.
 //
 // Remote view (devices flagged in the layout): instead of moving to the device's screens, its
 // screens are shown full screen, one at a time, on the local monitor where the edge was crossed
@@ -89,6 +95,7 @@ public:
     static constexpr int kDragCatchTimeoutMs = 1500;
 
     static constexpr int kViewRetryMs = 3000; // no new view of a device right after a failure
+    static constexpr int kRefusedRetryMs = 3000; // not entered again right after it refused input
 
 signals:
     void toSession(const QCborMap &msg);
@@ -105,9 +112,15 @@ signals:
     // `target` at `at` / the drag ended without a drop.
     void dragCatchRequested(const QByteArray &source, QPoint at);
     void dragDropped(const QByteArray &target, QPoint at);
+    // Master side: the device could not take the input, which came back here.
+    void inputRefused(const QByteArray &deviceId);
 
 private:
     void rebuild();
+    // Master side, input on another device: back home if no edge leads back any more.
+    void keepAWayHome();
+    // Slave side: tell the master to take its input back.
+    void refuseInput(const QByteArray &master);
     bool isMaster() const;
     void enter(const Crossing &target, Side side);
     void enterView(const QByteArray &device, QPoint edgePoint, Side side);
@@ -154,6 +167,7 @@ private:
     QPoint m_viewHome;             // where the cursor returns if the view fails
     bool m_viewAccepted = false;   // the source accepted: input is forwarded
     QHash<QByteArray, qint64> m_viewRetryAfter;
+    QHash<QByteArray, qint64> m_refusedUntil; // devices that refused the input, until when
     // Edge we last came back through, and when (see kReturnGuardMs).
     QElapsedTimer m_returnGuard;
     Side m_returnEdge = Side::Right;
@@ -176,6 +190,7 @@ private:
     quint32 m_lastMotionSeq = 0;
     bool m_haveMotionSeq = false;
     QByteArray m_blockedPeer;
+    bool m_masterHere = false; // the master's cursor is on this device (in.enter, no in.leave yet)
 };
 
 } // namespace df

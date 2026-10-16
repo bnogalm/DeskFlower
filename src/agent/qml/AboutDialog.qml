@@ -34,10 +34,18 @@ Dialog {
         anchors.fill: parent
         spacing: 12
 
-        Label {
-            text: qsTr("DeskFlower %1").arg(Qt.application.version)
-            font.pixelSize: 20
-            font.bold: true
+        RowLayout {
+            spacing: 12
+            Label {
+                text: qsTr("DeskFlower %1").arg(Qt.application.version)
+                font.pixelSize: 20
+                font.bold: true
+            }
+            Button {
+                text: qsTr("Download the latest version")
+                flat: true
+                onClicked: Qt.openUrlExternally(root.backend.downloadsUrl)
+            }
         }
         Label {
             text: "Copyright 2026 Benjamín Nogal Muñoz"

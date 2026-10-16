@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <atomic>
 #include <deque>
 #include <future>
@@ -24,6 +25,7 @@ constexpr UINT kWarpDoneMessage = WM_APP + 2;
 constexpr ULONGLONG kWarpTimeoutMs = 100; // backstop in case the warp sentinel is lost
 constexpr UINT_PTR kDesktopTimerMs = 250;
 constexpr ULONGLONG kEdgeThrottleMs = 15;
+constexpr int kParkSlack = 2; // pixels the parked cursor may be off before the hooks are suspect
 const wchar_t kHiderClass[] = L"DeskflowerCursorHider";
 // System cursors replaced by a blank one while the pointer is on another device (OCR_* values).
 constexpr DWORD kSystemCursors[] = {32512, 32513, 32514, 32515, 32516, 32642, 32643, 32644,
@@ -119,6 +121,7 @@ private:
             }
             if (msg.hwnd == nullptr && msg.message == WM_TIMER) {
                 followInputDesktop();
+                checkCapture();
                 continue;
             }
             TranslateMessage(&msg);
@@ -215,6 +218,52 @@ private:
         if (!m_mouseHook || !m_keyHook)
             qCWarning(lcWinInput) << "Cannot install input hooks, error" << GetLastError();
         refreshMonitors();
+    }
+
+    // While capturing, the mouse hook swallows every move, so the cursor stays parked. Windows
+    // silently removes low-level hooks that once took too long to answer (LowLevelHooksTimeout):
+    // then the hidden cursor moves, nothing reaches the service, and the user has neither this
+    // mouse nor the remote one. A cursor off its park point means that (or a program moved it):
+    // the hooks are put in again and the cursor parked. If they cannot be, capture ends here.
+    void checkCapture()
+    {
+        if (!m_capturing || m_warpPending)
+            return;
+        POINT p = {};
+        if (!GetCursorPos(&p) || (std::abs(p.x - m_park.x) <= kParkSlack && std::abs(p.y - m_park.y) <= kParkSlack))
+            return;
+        qCWarning(lcWinInput) << "The cursor left its park point while captured: putting the input hooks in again";
+        if (reinstallHooks()) {
+            SetCursorPos(m_park.x, m_park.y);
+            armWarpBarrier();
+            return;
+        }
+        qCWarning(lcWinInput) << "Cannot put the input hooks in again, error" << GetLastError() << ": capture ends";
+        const QPoint at(p.x, p.y);
+        endCapture(at);
+        QMetaObject::invokeMethod(this, [this, at] { emit captureLost(at); }, Qt::QueuedConnection);
+    }
+
+    // New hooks first, then the old ones out (a removed hook's handle is simply no longer valid).
+    bool reinstallHooks()
+    {
+        const HINSTANCE module = GetModuleHandleW(nullptr);
+        HHOOK mouse = SetWindowsHookExW(WH_MOUSE_LL, &WinInputBackend::mouseProc, module, 0);
+        HHOOK key = SetWindowsHookExW(WH_KEYBOARD_LL, &WinInputBackend::keyProc, module, 0);
+        if (!mouse || !key) {
+            if (mouse)
+                UnhookWindowsHookEx(mouse);
+            if (key)
+                UnhookWindowsHookEx(key);
+            return false;
+        }
+        if (m_mouseHook)
+            UnhookWindowsHookEx(m_mouseHook);
+        if (m_keyHook)
+            UnhookWindowsHookEx(m_keyHook);
+        m_mouseHook = mouse;
+        m_keyHook = key;
+        return true;
     }
 
     void tearDown()

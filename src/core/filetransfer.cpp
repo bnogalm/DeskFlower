@@ -227,7 +227,7 @@ void FileTransfer::pump(quint64 uploadHandle)
                 up->file = std::make_unique<QFile>(f.absolutePath);
                 if (!up->file->open(QIODevice::ReadOnly)) {
                     QCborMap err = typed(QStringLiteral("error"));
-                    err.insert(QStringLiteral("r"), QStringLiteral("Cannot read %1").arg(f.relativePath));
+                    err.insert(QStringLiteral("r"), QStringLiteral("A file could not be read"));
                     stream->send(control(err));
                     up->finished = true;
                     stream->close();
@@ -391,7 +391,7 @@ bool FileTransfer::consume(Download *d, QByteArray data, QString *error)
                 QDir().mkpath(QFileInfo(path).absolutePath());
                 d->file = std::make_unique<QFile>(path);
                 if (!d->file->open(QIODevice::WriteOnly)) {
-                    *error = QStringLiteral("Cannot write %1").arg(path);
+                    *error = QStringLiteral("A received file could not be written");
                     return false;
                 }
                 const QString top = QDir(d->targetDir).filePath(item.name.section(QLatin1Char('/'), 0, 0));

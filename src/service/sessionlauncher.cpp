@@ -89,7 +89,9 @@ QString SessionLauncher::program() const
 
 QStringList SessionLauncher::arguments() const
 {
-    QStringList args{QStringLiteral("--log-dir"), m_logDir};
+    QStringList args;
+    if (!m_logDir.isEmpty()) // no log file otherwise
+        args << QStringLiteral("--log-dir") << m_logDir;
     if (!m_instance.isEmpty())
         args << QStringLiteral("--instance") << m_instance;
     return args;

@@ -45,6 +45,8 @@ class Backend : public QObject
     Q_PROPERTY(int thumbRevision READ thumbRevision NOTIFY thumbnailsChanged)
     Q_PROPERTY(QString sharedFolder READ sharedFolder NOTIFY stateChanged)
     Q_PROPERTY(QUrl sharedFolderUrl READ sharedFolderUrl NOTIFY stateChanged)
+    // Web page with the latest installers (to update by hand).
+    Q_PROPERTY(QUrl downloadsUrl READ downloadsUrl CONSTANT)
     Q_PROPERTY(bool phoneAccess READ phoneAccess NOTIFY stateChanged)
     Q_PROPERTY(bool phoneRunning READ phoneRunning NOTIFY stateChanged)
     Q_PROPERTY(int phoneSessions READ phoneSessions NOTIFY stateChanged)
@@ -86,6 +88,7 @@ public:
     bool sessionRunning() const { return m_sessionRunning; }
     QString sharedFolder() const { return m_files.value(QStringLiteral("folder")).toString(); }
     QUrl sharedFolderUrl() const { return QUrl::fromLocalFile(sharedFolder()); }
+    static QUrl downloadsUrl() { return QUrl(QStringLiteral("https://bnogalm.github.io/DeskFlower/#download")); }
     bool phoneAccess() const { return m_files.value(QStringLiteral("phoneAccess")).toBool(); }
     bool phoneRunning() const { return m_files.value(QStringLiteral("phoneRunning")).toBool(); }
     int phoneSessions() const { return m_files.value(QStringLiteral("phoneSessions")).toInt(); }

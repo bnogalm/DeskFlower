@@ -1,6 +1,6 @@
 @echo off
 rem Builds a release, installs a self-contained copy (executables + Qt + OpenSSL + MSVC runtime) into
-rem dist\Deskflower and wraps it into dist\Deskflower-<version>-x64.msi with WiX 3 (downloaded once
+rem dist\Deskflower and wraps it into dist\Deskflower-<version>-Windows-x64.msi with WiX 3 (downloaded once
 rem into build\tools\wix, nothing is installed on the machine).
 rem Update signing (README, "Signed updates"): the key pair lives in %DESKFLOWER_SIGNING_DIR%, by default
 rem release-signing-key\ at the repository root (git-ignored, never packaged). It is created on the
@@ -67,12 +67,12 @@ mkdir "%WORK%"
 "%WIX%\candle.exe" -nologo -arch x64 -ext WixUtilExtension -dVersion=%VERSION% -dSourceDir="%DEST%" -dIconFile="%ROOT%\resources\icons\deskflower.ico" -out "%WORK%\\" "%ROOT%\installer\windows\deskflower.wxs" "%WORK%\files.wxs" || exit /b 1
 rem ICE38/43/57 expect per-user shortcuts; this is a per-machine package (ALLUSERS=1), where the
 rem Start menu folder is the common one and an HKLM key path is the right choice.
-if exist "%ROOT%\dist\Deskflower-%VERSION%-x64.msi" del "%ROOT%\dist\Deskflower-%VERSION%-x64.msi"
-"%WIX%\light.exe" -nologo -ext WixUtilExtension -spdb -sice:ICE38 -sice:ICE43 -sice:ICE57 -out "%ROOT%\dist\Deskflower-%VERSION%-x64.msi" "%WORK%\deskflower.wixobj" "%WORK%\files.wixobj" || exit /b 1
+if exist "%ROOT%\dist\Deskflower-%VERSION%-Windows-x64.msi" del "%ROOT%\dist\Deskflower-%VERSION%-Windows-x64.msi"
+"%WIX%\light.exe" -nologo -ext WixUtilExtension -spdb -sice:ICE38 -sice:ICE43 -sice:ICE57 -out "%ROOT%\dist\Deskflower-%VERSION%-Windows-x64.msi" "%WORK%\deskflower.wixobj" "%WORK%\files.wixobj" || exit /b 1
 
 rem Signed manifest for updates between paired devices. The signing tool is not shipped; it runs
 rem with the Qt and MSVC runtime DLLs of the packaged copy.
-set "MSI=%ROOT%\dist\Deskflower-%VERSION%-x64.msi"
+set "MSI=%ROOT%\dist\Deskflower-%VERSION%-Windows-x64.msi"
 if exist "%MSI%.manifest" del "%MSI%.manifest"
 if exist "%MSI%.manifest.sig" del "%MSI%.manifest.sig"
 set "PATH=%DEST%\bin;%PATH%"
@@ -81,8 +81,8 @@ set "PATH=%DEST%\bin;%PATH%"
 "%SIGN%" verify --compiled "%MSI%.manifest" "%MSI%.manifest.sig" || goto keymismatch
 
 echo.
-echo Installer: dist\Deskflower-%VERSION%-x64.msi
-echo Signed update manifest: dist\Deskflower-%VERSION%-x64.msi.manifest + .manifest.sig
+echo Installer: dist\Deskflower-%VERSION%-Windows-x64.msi
+echo Signed update manifest: dist\Deskflower-%VERSION%-Windows-x64.msi.manifest + .manifest.sig
 echo Portable copy: dist\Deskflower\bin
 echo Update signing key: %KEYDIR%
 if "%NEWKEY%"=="no" goto :eof

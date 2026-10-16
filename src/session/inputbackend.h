@@ -47,4 +47,7 @@ signals:
     void wheelEvent(int dx, int dy);
     void keyEvent(quint32 scancode, bool down);
     void localRelease(QPoint at);
+    // Capture ended on its own (the platform took the input hooks away and they could not be put
+    // back): the keyboard and mouse are local again, the cursor at `at`.
+    void captureLost(QPoint at);
 };

@@ -91,10 +91,17 @@ int runNode(int argc, char **argv, bool serviceMode)
         qCritical().noquote() << "Cannot secure" << configDir;
         return 1;
     }
-    df::installFileLogging(QDir(configDir).filePath(QStringLiteral("logs")), QStringLiteral("service.log"), !serviceMode);
-    df::platform::installQuitHandlers();
-
     df::Settings settings(configDir);
+    // Log files only when asked for in settings.json ("logging": true).
+    const bool logToFile = settings.value(QStringLiteral("logging"), false).toBool();
+    const QString logDir = QDir(configDir).filePath(QStringLiteral("logs"));
+    df::installFileLogging(logDir, QStringLiteral("service.log"), !serviceMode, logToFile);
+    if (!logToFile) {
+        QFile::remove(QDir(logDir).filePath(QStringLiteral("session.log")));
+        QFile::remove(QDir(logDir).filePath(QStringLiteral("session.log.1")));
+        QFile::remove(QDir(logDir).filePath(QStringLiteral("update-install.log")));
+    }
+    df::platform::installQuitHandlers();
     df::Node::Options options;
     options.configDir = configDir;
     // Ports: Advanced settings in the agent (applied at the next start); --port wins.
@@ -159,7 +166,8 @@ int runNode(int argc, char **argv, bool serviceMode)
     phoneOptions.asUser = [serviceMode] { return df::platform::actAsInteractiveUser(serviceMode); };
     df::web::PhoneServer phone(phoneOptions);
     df::RemoteView remoteView(&node, &workspace);
-    PlatformInstaller installer(serviceMode, QDir(configDir).filePath(QStringLiteral("logs/update-install.log")));
+    PlatformInstaller installer(serviceMode,
+                                logToFile ? QDir(logDir).filePath(QStringLiteral("update-install.log")) : QString());
     df::Updater updater(&node, &installer,
                         df::Updater::Options::defaults(QDir(configDir).filePath(QStringLiteral("updates"))));
     if (serviceMode) {
@@ -180,8 +188,7 @@ int runNode(int argc, char **argv, bool serviceMode)
     }
     std::unique_ptr<df::SessionLauncher> launcher;
     if (!parser.isSet(noSessionOpt))
-        launcher = std::make_unique<df::SessionLauncher>(
-            instance, QDir(configDir).filePath(QStringLiteral("logs")), serviceMode);
+        launcher = std::make_unique<df::SessionLauncher>(instance, logToFile ? logDir : QString(), serviceMode);
     // With --no-session the helper can be started by hand (e.g. under a debugger) using a token
     // agreed through DESKFLOWER_SESSION_TOKEN.
     const QByteArray sessionToken = launcher ? launcher->token() : qgetenv("DESKFLOWER_SESSION_TOKEN");

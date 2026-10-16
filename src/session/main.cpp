@@ -26,7 +26,7 @@ int main(int argc, char *argv[])
     parser.process(app);
 
     if (parser.isSet(logDirOpt))
-        df::installFileLogging(parser.value(logDirOpt), QStringLiteral("session.log"), true);
+        df::installFileLogging(parser.value(logDirOpt), QStringLiteral("session.log"), true, true);
 
     // The service passes a secret so that only the helper it started can claim the session role.
     const QByteArray token = qgetenv("DESKFLOWER_SESSION_TOKEN");

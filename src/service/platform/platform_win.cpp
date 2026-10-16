@@ -539,8 +539,10 @@ bool launchPackageInstaller(const QString &package, const QString &logPath,
     // when the package's custom actions stop this service; the MajorUpgrade replaces the old version.
     const QString msiexec =
         QDir::toNativeSeparators(QDir(QString::fromWCharArray(system)).filePath(QStringLiteral("msiexec.exe")));
-    const QString commandLine = QStringLiteral("\"%1\" /i \"%2\" /qn /norestart /l*v \"%3\"")
-                                    .arg(msiexec, QDir::toNativeSeparators(package), QDir::toNativeSeparators(logPath));
+    QString commandLine =
+        QStringLiteral("\"%1\" /i \"%2\" /qn /norestart").arg(msiexec, QDir::toNativeSeparators(package));
+    if (!logPath.isEmpty()) // only with logging on
+        commandLine += QStringLiteral(" /l*v \"%1\"").arg(QDir::toNativeSeparators(logPath));
     const std::wstring application = msiexec.toStdWString();
     std::wstring cmd = commandLine.toStdWString();
     STARTUPINFOW si = {};

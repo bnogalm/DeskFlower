@@ -48,7 +48,7 @@ void handler(QtMsgType type, const QMessageLogContext &context, const QString &m
                                 .arg(QLatin1String(context.category ? context.category : "default"), message)
                                 .toUtf8();
     QMutexLocker lock(&g_mutex);
-    if (g_file && g_file->isOpen()) {
+    if (g_file && g_file->isOpen() && type != QtDebugMsg) {
         g_file->write(line);
         g_file->flush();
         rotateIfNeeded();
@@ -60,12 +60,18 @@ void handler(QtMsgType type, const QMessageLogContext &context, const QString &m
 }
 } // namespace
 
-void installFileLogging(const QString &dir, const QString &fileName, bool alsoStderr)
+void installFileLogging(const QString &dir, const QString &fileName, bool alsoStderr, bool toFile)
 {
-    QDir().mkpath(dir);
-    g_file = new QFile(QDir(dir).filePath(fileName));
-    if (!g_file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
-        std::fprintf(stderr, "Cannot open log file %s\n", qPrintable(g_file->fileName()));
+    const QString path = QDir(dir).filePath(fileName);
+    if (toFile) {
+        QDir().mkpath(dir);
+        g_file = new QFile(path);
+        if (!g_file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text))
+            std::fprintf(stderr, "Cannot open log file %s\n", qPrintable(g_file->fileName()));
+    } else {
+        QFile::remove(path);
+        QFile::remove(path + QStringLiteral(".1"));
+    }
     g_stderr = alsoStderr;
     qInstallMessageHandler(handler);
 }

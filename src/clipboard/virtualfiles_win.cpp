@@ -233,7 +233,7 @@ private:
                                                   STGM_READ | STGM_SHARE_DENY_WRITE, FILE_ATTRIBUTE_NORMAL, FALSE,
                                                   nullptr, &stream);
         if (FAILED(hr)) {
-            qCWarning(lcVirtualFiles) << "Cannot open" << local << Qt::hex << quint32(hr);
+            qCWarning(lcVirtualFiles) << "Cannot open a received file" << Qt::hex << quint32(hr);
             return hr;
         }
         medium->tymed = TYMED_ISTREAM;

@@ -142,6 +142,13 @@
     .card p { margin: 0; color: var(--muted); font-size: 15px; }
     .card .ico { font-size: 26px; }
 
+    .downloads { text-align: center; padding: 80px 0 30px; }
+    .downloads h2 { font-size: clamp(26px, 3.4vw, 36px); margin: 0 0 10px; }
+    .downloads .systems { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin: 22px 0; }
+    .downloads .systems .btn { min-width: 190px; }
+    .downloads .systems small { display: block; font-size: 12px; font-weight: 400; opacity: .8; }
+    .downloads p { color: var(--muted); max-width: 640px; margin: 0 auto 10px; }
+    .downloads p a { color: inherit; }
     .support { text-align: center; padding: 90px 0; border-top: 1px solid var(--line); }
     .support h2 { font-size: clamp(26px, 3.4vw, 36px); margin: 0 0 14px; }
     .support p { color: var(--muted); max-width: 680px; margin: 0 auto 26px; }
@@ -157,7 +164,7 @@
         <a href="#keyboard">Features</a>
         <a href="#phone">Phone</a>
         <a href="#support">Support</a>
-        <a class="btn js-download" href="#">Download</a>
+        <a class="btn" href="#download">Download</a>
       </nav>
     </div>
   </header>
@@ -169,10 +176,10 @@
       <p>Move the cursor past the edge of the screen and keep working on the next computer.
          Copy, paste and drag files between them as if they were one. On your local network, no accounts, no cloud.</p>
       <div class="actions">
-        <a class="btn js-download" href="#">Download for Windows</a>
+        <a class="btn js-download" href="#download">Download</a>
         <a class="btn ghost js-source" href="#">Source code</a>
       </div>
-      <p class="note">Free for personal use · Linux and macOS on the way</p>
+      <p class="note">Free for personal use · Windows, macOS and Linux</p>
       <div class="shot reveal"><img class="media" src="img/screens.png" alt="DeskFlower window: the screens of two computers placed side by side" width="886" height="753"></div>
     </section>
 
@@ -280,6 +287,19 @@
       </div>
     </section>
 
+    <section class="downloads wrap reveal" id="download">
+      <h2>Download</h2>
+      <p class="js-version">The latest version, straight from GitHub.</p>
+      <div class="systems">
+        <a class="btn" data-system="windows" href="#">Windows<small>Windows 10 and 11 · .msi</small></a>
+        <a class="btn ghost" data-system="macos" href="#">macOS<small>Apple silicon · .dmg · preview</small></a>
+        <a class="btn ghost" data-system="linux" href="#">Linux<small>Debian, Ubuntu · .deb · preview</small></a>
+      </div>
+      <p><b>To update</b>, download the new version and install it over the one you have: paired computers and
+         settings are kept, and paired computers then update from this one.</p>
+      <p><a class="js-releases" href="#">All versions and release notes</a></p>
+    </section>
+
     <section class="support reveal" id="support">
       <div class="wrap">
         <img class="bouquet" src="img/bouquets.png" alt="Bouquets with one flower per computer" width="1368" height="170">
@@ -300,7 +320,43 @@
     // The published repository (owner/name).
     const REPO = 'bnogalm/DeskFlower';
     const base = `https://github.com/${REPO}`;
-    document.querySelectorAll('.js-download').forEach(a => a.href = `${base}/releases/latest`);
+    const releases = `${base}/releases/latest`;
+    document.querySelectorAll('.js-releases').forEach(a => a.href = releases);
+
+    // Downloads: a direct link to each system's installer in the latest release (the release page
+    // if GitHub cannot be asked). The main button downloads the visitor's own system.
+    const systems = {
+      windows: { name: 'Windows', asset: /windows.*\.msi$|\.msi$/i },
+      macos: { name: 'macOS', asset: /\.dmg$/i },
+      linux: { name: 'Linux', asset: /linux.*\.deb$|\.deb$/i },
+    };
+    const ua = (navigator.userAgentData?.platform || navigator.platform || '') + ' ' + navigator.userAgent;
+    const visitor = /android|iphone|ipad/i.test(ua) ? null
+      : /win/i.test(ua) ? 'windows' : /mac/i.test(ua) ? 'macos' : /linux|x11/i.test(ua) ? 'linux' : null;
+    const links = {};
+    for (const id in systems) links[id] = releases;
+    const show = () => {
+      document.querySelectorAll('[data-system]').forEach(a => a.href = links[a.dataset.system]);
+      document.querySelectorAll('.js-download').forEach(a => {
+        if (!visitor) return; // a phone, or unknown: the downloads section
+        a.href = links[visitor];
+        a.textContent = `Download for ${systems[visitor].name}`;
+      });
+    };
+    show();
+    fetch(`https://api.github.com/repos/${REPO}/releases/latest`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(release => {
+        for (const id in systems) {
+          const asset = (release.assets || []).find(a => systems[id].asset.test(a.name));
+          if (asset) links[id] = asset.browser_download_url;
+        }
+        const version = (release.tag_name || '').replace(/^v/, '');
+        if (version)
+          document.querySelectorAll('.js-version').forEach(p => p.textContent = `Version ${version}, straight from GitHub.`);
+        show();
+      })
+      .catch(() => {}); // the release page then
     document.querySelectorAll('.js-source').forEach(a => a.href = base);
     document.querySelectorAll('.js-license').forEach(a => a.href = `${base}/blob/main/COMMERCIAL-LICENSE.md`);
 

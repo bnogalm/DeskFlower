@@ -110,6 +110,11 @@ void InputController::sessionDisconnected()
     m_ping.stop();
     if (m_active != m_node->id())
         returnLocal(m_router.primaryCenter(m_node->id()), true);
+    // Slave: nothing moves the cursor here any more, so the master's would be stuck on this device.
+    if (m_masterHere) {
+        m_masterHere = false;
+        refuseInput(m_workspace->masterId());
+    }
 }
 
 void InputController::returnHome()
@@ -137,6 +142,30 @@ void InputController::rebuild()
     // Losing the master role while controlling another device hands the input back.
     if (!isMaster() && m_active != m_node->id())
         returnLocal(m_router.primaryCenter(m_node->id()), true);
+    else if (m_active != m_node->id())
+        keepAWayHome();
+}
+
+void InputController::keepAWayHome()
+{
+    const QByteArray self = m_node->id();
+    if (!m_router.canReach(m_active, self)) {
+        qCInfo(lcInput) << "No way back from" << m_active.toHex() << "(its screens changed): input back home";
+        returnLocal(m_router.primaryCenter(self), true);
+        return;
+    }
+    if (m_viewing) {
+        if (!m_router.screens(m_active).contains(m_viewRemote)) {
+            qCInfo(lcInput) << "The viewed screen of" << m_active.toHex() << "is gone: back home";
+            returnLocal(m_viewHome, true);
+        }
+        return;
+    }
+    if (!m_router.contains(m_active, m_cursor)) {
+        // Its screen went away or shrank: onto the nearest one that is left.
+        m_cursor = m_router.clamp(m_active, m_cursor, m_cursor);
+        sendMotion();
+    }
 }
 
 // --- Master side -------------------------------------------------------------------------------
@@ -156,6 +185,8 @@ void InputController::handleSessionMessage(const QCborMap &msg)
         const auto target = m_router.cross(self, at, side);
         if (!target || target->device == self || !m_node->isConnected(target->device))
             return;
+        if (nowMs() < m_refusedUntil.value(target->device, -1))
+            return; // it just refused the input
         if (m_pendingCrossing)
             return; // waiting to know what is dragged
         if (msg.value(QStringLiteral("lb")).toBool() && !m_dragging) {
@@ -173,6 +204,14 @@ void InputController::handleSessionMessage(const QCborMap &msg)
         }
         else
             enter(*target, side);
+        return;
+    }
+    if (cmd == QLatin1String("captureLost")) {
+        // The helper could not keep the keyboard and mouse: they are local again, so is the input.
+        if (m_active != self) {
+            qCInfo(lcInput) << "The session helper lost the capture: input back home";
+            returnLocal(QPoint(i(msg, kX), i(msg, kY)), true);
+        }
         return;
     }
     if (cmd == QLatin1String("dragRelease")) {
@@ -490,7 +529,8 @@ void InputController::moveBy(int dx, int dy)
             returnLocal(at, true);
             return;
         }
-        if (target && m_node->isConnected(target->device)) {
+        if (target && m_node->isConnected(target->device)
+            && nowMs() >= m_refusedUntil.value(target->device, -1)) {
             if (catchDrag) {
                 m_cursor = clamped;
                 beginCatch(m_active, clamped, PendingCrossing{false, *target, side, {}});
@@ -597,6 +637,17 @@ void InputController::onPeerMessage(const QByteArray &peerId, const QCborMap &ms
     const QString type = msg.value(QStringLiteral("t")).toString();
     if (!type.startsWith(QLatin1String("in.")))
         return;
+    if (type == QLatin1String("in.refused")) {
+        // Master side: the device cannot take the input (nothing runs in its session to move its
+        // cursor); the user would be stuck there.
+        if (isMaster() && peerId == m_active) {
+            qCInfo(lcInput) << peerId.toHex() << "cannot take the input: back home";
+            m_refusedUntil.insert(peerId, nowMs() + kRefusedRetryMs);
+            returnLocal(m_router.primaryCenter(m_node->id()), false);
+            emit inputRefused(peerId);
+        }
+        return;
+    }
     if (peerId != m_workspace->masterId() || peerId == m_node->id()) {
         qCDebug(lcInput) << "Ignoring" << type << "from" << peerId.toHex() << "(not the master)";
         return; // only the master may drive this device
@@ -605,6 +656,11 @@ void InputController::onPeerMessage(const QByteArray &peerId, const QCborMap &ms
         return; // it cannot answer our user's prompt for them
 
     if (type == QLatin1String("in.enter")) {
+        if (!m_sessionUp) {
+            refuseInput(peerId);
+            return;
+        }
+        m_masterHere = true;
         m_haveMotionSeq = false;
         m_cursorAway = false;
         QCborMap m;
@@ -612,6 +668,7 @@ void InputController::onPeerMessage(const QByteArray &peerId, const QCborMap &ms
         m.insert(kY, i(msg, kY));
         emitSession(QStringLiteral("mabs"), m);
     } else if (type == QLatin1String("in.leave")) {
+        m_masterHere = false;
         m_cursorAway = true;
         m_cursorLeftAt = nowMs();
         emitSession(QStringLiteral("releaseAll"));
@@ -634,6 +691,16 @@ void InputController::onPeerMessage(const QByteArray &peerId, const QCborMap &ms
         m.insert(kD, msg.value(kD).toBool());
         emitSession(QStringLiteral("key"), m);
     }
+}
+
+void InputController::refuseInput(const QByteArray &master)
+{
+    if (master.isEmpty() || master == m_node->id() || !m_node->isConnected(master))
+        return;
+    qCInfo(lcInput) << "Nothing can move the cursor in this session: input refused";
+    QCborMap m;
+    m.insert(QStringLiteral("t"), QStringLiteral("in.refused"));
+    m_node->sendMessage(master, m);
 }
 
 void InputController::onPeerDatagram(const QByteArray &peerId, const QByteArray &data)

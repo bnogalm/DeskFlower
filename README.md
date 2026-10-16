@@ -115,6 +115,17 @@ be arranged.
 - Leaving a device releases everything injected there. A device only obeys the current master.
   If the master disconnects, the device releases its keys. If the helper stops receiving the
   service's heartbeat for 3 s, it gives the input back.
+- There is always a way home. If the screens change while the cursor is on another device (a
+  monitor goes off, a resolution or the layout changes), the cursor moves onto what is left; when
+  no edge leads back to the master any more, or the device has no screens left, the input comes
+  back to the master (`Router::canReach`). A device whose session helper is not running (nothing
+  would move its cursor) answers `in.refused`: the master keeps its input, says so, and does not
+  enter that device again for 3 s.
+- Windows silently removes low-level hooks that once took too long to answer
+  (`LowLevelHooksTimeout`). While capturing, the mouse hook swallows every move, so the hidden
+  cursor stays parked: every 250 ms the helper checks that it still is. If it moved, the hooks
+  were taken away (or a program moved it): they are put in again and the cursor parked. If that
+  fails, capture ends and the helper tells the service (`captureLost`), which brings the input home.
 - Keys go only to the device the cursor is on. When the master locks, signs out or switches
   sessions while the cursor is elsewhere, the cursor comes back to it first
   (`InputController::returnHome`), so what is typed on its lock screen (the password) stays there.
@@ -365,9 +376,9 @@ the macOS bundles (`CFBundleIconFile`).
 
 | Platform | Package | Built by | Status |
 |---|---|---|---|
-| Windows | MSI (WiX 3, downloaded into `build/tools`) | `scripts\package-windows.bat` → `dist\Deskflower-<version>-x64.msi` | Built and installed |
-| Linux | DEB, self-contained in `/opt/deskflower` | `cpack -G DEB` in the build directory; CI | Not built yet |
-| macOS | DMG with the app bundles | `cpack -G DragNDrop`; CI | Not built yet |
+| Windows | MSI (WiX 3, downloaded into `build/tools`) | `scripts\package-windows.bat` → `dist\Deskflower-<version>-Windows-x64.msi` | Built and installed |
+| Linux | DEB, self-contained in `/opt/deskflower` | `cpack -G DEB` in the build directory; CI → `deskflower_<version>-Linux-amd64.deb` | Built by CI, not tried on a real machine |
+| macOS | DMG with the app bundles | `cpack -G DragNDrop`; CI → `deskflower-<version>-macOS-arm64.dmg` | Built by CI, not tried on a real machine |
 
 **Web page** (`docs/index.html`, GitHub Pages: *Settings → Pages → Deploy from a branch*, `main`,
 `/docs`): the feature guide, with screenshots taken from two demo instances ("Office PC" and
@@ -428,7 +439,7 @@ they can serve in the authenticated `hello`. The package travels over the encryp
 Signature, platform, version and size are checked from the manifest before any data is accepted.
 After the download the service reopens the file read-only with a sharing mode that refuses writers,
 renames and deletes, hashes those exact bytes again and starts
-`%SystemRoot%\System32\msiexec.exe /i <msi> /qn /norestart` (log:
+`%SystemRoot%\System32\msiexec.exe /i <msi> /qn /norestart` (with logging on, its log goes to
 `%ProgramData%\DeskFlower\logs\update-install.log`) while it still holds the file. msiexec is a
 separate process, so it carries on when the MSI stops the service; `MajorUpgrade` removes the old
 version and the new service starts at the end. Until then no other update starts and the file stays
@@ -464,7 +475,7 @@ at it). If it is lost, the next run creates a new key and every device has to be
 hand once.
 
 Each run builds the release with `DESKFLOWER_UPDATE_PUBKEY` set to the public key, creates the MSI
-and writes `dist\Deskflower-<version>-x64.msi.manifest` and `.manifest.sig` next to it, checking the
+and writes `dist\Deskflower-<version>-Windows-x64.msi.manifest` and `.manifest.sig` next to it, checking the
 signature against the key compiled into that build. Elsewhere, configure with
 `-DDESKFLOWER_UPDATE_PUBKEY=<hex>` (or the environment variable of the same name). The tool also
 works by hand:
@@ -522,8 +533,12 @@ start `deskflower-session --instance <name>` with the same variable.
 In agent A, click **Pair** next to B and type the PIN that B displays. Then open the **Screens**
 tab (or start the agent with `--page screens`) to arrange both devices.
 
-The service logs to stderr in console mode and always to `<config dir>/logs/service.log`; the
-session helper logs to `<config dir>/logs/session.log`.
+**Logs** are off by default. Turn them on by hand with `"logging": true` in
+`<config dir>/settings.json` (there is no option in the agent) and restart the service: it then
+writes `<config dir>/logs/service.log`, the session helper `session.log` and updates
+`update-install.log`. With logging off those files are deleted at start. Log files never get debug
+messages, and no message carries typed keys, clipboard contents, file names or paths: they only say
+what happened (connections, crossings, errors). In console mode every message also goes to stderr.
 
 Ports: UDP 24800 (discovery via multicast `239.255.77.100` and broadcast), UDP 24801 (sessions),
 TCP 24801 (file transfers) and TCP 24802 (phone access over HTTPS, only while enabled).

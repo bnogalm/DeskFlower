@@ -575,7 +575,7 @@ HttpResponse PhoneServer::receiveUpload(const HttpRequest &request)
 #endif
     if (!QFile::rename(partPath, finalPath))
         return jsonError(500, QStringLiteral("Cannot finish the upload"));
-    qCInfo(lcPhone) << "Received" << finalPath;
+    qCInfo(lcPhone) << "Received a file from a phone";
     emit fileUploaded(finalPath);
     o.insert(QStringLiteral("done"), true);
     o.insert(QStringLiteral("name"), QFileInfo(finalPath).fileName());

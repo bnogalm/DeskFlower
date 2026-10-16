@@ -37,6 +37,10 @@ public:
     QPoint clamp(const QByteArray &device, QPoint from, QPoint to) const;
     // Where a cursor at `p` on `device` pushing past `side` ends up, if another device is there.
     std::optional<Crossing> cross(const QByteArray &device, QPoint p, Side side) const;
+    // Whether the cursor can go from `from` to `to` through screen edges (directly or across other
+    // devices), by the same rule as cross: screens of two devices that overlap along an edge and
+    // are at most kMaxGap apart across it. False if either device has no screens.
+    bool canReach(const QByteArray &from, const QByteArray &to) const;
     // Centre of the device's primary screen (fallback position).
     QPoint primaryCenter(const QByteArray &device) const;
     // The device's primary screen (local coordinates), or an empty rect if unknown.

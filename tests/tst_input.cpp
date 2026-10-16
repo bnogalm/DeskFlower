@@ -40,6 +40,45 @@ int count(const QSignalSpy &spy, const QString &name)
         n += args.at(0).value<QCborMap>().value(QStringLiteral("ev")).toString() == name;
     return n;
 }
+
+// A (1920x1080) on the left, sharing, B on its right with the given screens; both input
+// controllers; B's session helper connected unless told otherwise.
+struct Pair {
+    QTemporaryDir dirA, dirB;
+    std::unique_ptr<Node> a, b;
+    std::unique_ptr<Workspace> wa, wb;
+    std::unique_ptr<InputController> ia, ib;
+    std::unique_ptr<QSignalSpy> toA, toB;
+
+    bool setUp(const QList<ScreenInfo> &screensB, bool sessionB = true)
+    {
+        a = test::makeNode(dirA.path());
+        b = test::makeNode(dirB.path());
+        wa = std::make_unique<Workspace>(a.get(), dirA.path());
+        wb = std::make_unique<Workspace>(b.get(), dirB.path());
+        wa->setLocalScreens({ScreenInfo{"a1", "", QRect(0, 0, 1920, 1080), 1, true}});
+        wb->setLocalScreens(screensB);
+        if (!test::pairNodes(*a, *b) || !QTest::qWaitFor([&] { return wa->devices().size() == 2; }, 5000))
+            return false;
+        wa->setLayout({{a->id(), {0, 0}}, {b->id(), {1920, 0}}});
+        wa->setSharing(true);
+        if (!QTest::qWaitFor([&] { return wb->masterId() == a->id(); }, 5000))
+            return false;
+        ia = std::make_unique<InputController>(a.get(), wa.get());
+        ib = std::make_unique<InputController>(b.get(), wb.get());
+        toA = std::make_unique<QSignalSpy>(ia.get(), &InputController::toSession);
+        toB = std::make_unique<QSignalSpy>(ib.get(), &InputController::toSession);
+        ia->sessionConnected();
+        if (sessionB)
+            ib->sessionConnected();
+        return true;
+    }
+
+    void enterB(int y = 500)
+    {
+        ia->handleSessionMessage(cmd("edge", {{"s", int(Side::Right)}, {"x", 1919}, {"y", y}}));
+    }
+};
 } // namespace
 
 class TestInput : public QObject
@@ -140,6 +179,85 @@ private slots:
         QTRY_COMPARE(count(toB, "releaseAll"), 2);
         QTest::qWait(200);
         QCOMPARE(count(toB, "key"), keysOnB);
+    }
+
+    // The cursor is on B when B's screens change: it stays on what is left, and when no edge leads
+    // back to A any more it comes home instead of being stuck there.
+    void alwaysAWayHome()
+    {
+        Pair p;
+        QVERIFY(p.setUp({ScreenInfo{"b1", "", QRect(0, 0, 1920, 1080), 1, true},
+                         ScreenInfo{"b2", "", QRect(1920, 0, 1920, 1080), 1, false}}));
+        p.enterB();
+        QCOMPARE(p.ia->activeDevice(), p.b->id());
+        p.ia->handleSessionMessage(cmd("mm", {{"x", 2500}, {"y", 0}}));
+        QCOMPARE(p.ia->cursor(), QPoint(2501, 500)); // on b2, away from A
+
+        // b2 gets a lower resolution: the cursor moves onto what is left of it.
+        p.wb->setLocalScreens({ScreenInfo{"b1", "", QRect(0, 0, 1920, 1080), 1, true},
+                               ScreenInfo{"b2", "", QRect(1920, 0, 400, 300), 1, false}});
+        QTRY_COMPARE(p.ia->cursor(), QPoint(2319, 299));
+        QCOMPARE(p.ia->activeDevice(), p.b->id());
+
+        // b1 goes off (only b2 is left, further right): no edge leads back to A.
+        p.wb->setLocalScreens({ScreenInfo{"b2", "", QRect(1920, 0, 400, 300), 1, true}});
+        QTRY_COMPARE(p.ia->activeDevice(), p.a->id());
+        QCOMPARE(lastEvent(*p.toA, "capture").value(QStringLiteral("on")).toBool(), false);
+
+        // Back on B (b1 is back), whose screens then disappear altogether.
+        p.wb->setLocalScreens({ScreenInfo{"b1", "", QRect(0, 0, 1920, 1080), 1, true}});
+        QTRY_VERIFY(p.wa->screens(p.b->id()).size() == 1);
+        QTest::qWait(300); // past the guard of the edge we came back through
+        p.enterB();
+        QCOMPARE(p.ia->activeDevice(), p.b->id());
+        p.wb->setLocalScreens({});
+        QTRY_COMPARE(p.ia->activeDevice(), p.a->id());
+    }
+
+    // Nothing runs in B's session to move its cursor: B refuses the input and A keeps it, instead
+    // of capturing the keyboard and mouse for a cursor nobody sees.
+    void aDeviceThatCannotTakeInputRefusesIt()
+    {
+        Pair p;
+        QVERIFY(p.setUp({ScreenInfo{"b1", "", QRect(0, 0, 1920, 1080), 1, true}}, false));
+        QSignalSpy refused(p.ia.get(), &InputController::inputRefused);
+        p.enterB();
+        QTRY_COMPARE(refused.size(), 1);
+        QCOMPARE(p.ia->activeDevice(), p.a->id());
+        QCOMPARE(lastEvent(*p.toA, "capture").value(QStringLiteral("on")).toBool(), false);
+        // Pushing on the edge does not go straight back to it.
+        p.enterB();
+        QCOMPARE(p.ia->activeDevice(), p.a->id());
+
+        // Its session comes back: once the pause is over, the cursor goes there again...
+        p.ib->sessionConnected();
+        QTest::qWait(InputController::kRefusedRetryMs + 100);
+        p.enterB();
+        QCOMPARE(p.ia->activeDevice(), p.b->id());
+        QTRY_VERIFY(!lastEvent(*p.toB, "mabs").isEmpty());
+        // ...and if it goes away while the cursor is there, the input comes home.
+        p.ib->sessionDisconnected();
+        QTRY_COMPARE(p.ia->activeDevice(), p.a->id());
+        QCOMPARE(refused.size(), 2);
+    }
+
+    // The master's helper could not keep the keyboard and mouse (Windows took its hooks away):
+    // the input is local again, where the helper left the cursor.
+    void lostCaptureBringsTheInputHome()
+    {
+        Pair p;
+        QVERIFY(p.setUp({ScreenInfo{"b1", "", QRect(0, 0, 1920, 1080), 1, true}}));
+        p.enterB();
+        QCOMPARE(p.ia->activeDevice(), p.b->id());
+        p.ia->handleSessionMessage(cmd("captureLost", {{"x", 960}, {"y", 540}}));
+        QCOMPARE(p.ia->activeDevice(), p.a->id());
+        QCOMPARE(p.ia->cursor(), QPoint(960, 540));
+        QTRY_VERIFY(count(*p.toB, "releaseAll") >= 1); // B released what it was holding
+        // Nothing more reaches B.
+        const int keysOnB = count(*p.toB, "key");
+        p.ia->handleSessionMessage(cmd("key", {{"s", 0x1E}, {"d", true}}));
+        QTest::qWait(200);
+        QCOMPARE(count(*p.toB, "key"), keysOnB);
     }
 
     void onlyTheMasterIsObeyed()

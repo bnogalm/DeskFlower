@@ -1,5 +1,8 @@
 #include "router.h"
 
+#include <QSet>
+
+#include <algorithm>
 #include <climits>
 #include <cstdlib>
 
@@ -103,6 +106,45 @@ std::optional<Crossing> Router::cross(const QByteArray &device, QPoint p, Side s
     case Side::Top: entry.setY(r.bottom()); break;
     }
     return Crossing{best->device, entry - (best->global.topLeft() - best->local.topLeft())};
+}
+
+namespace {
+// Whether the cursor can cross between the two screens (in the shared plane), as in cross.
+bool touches(const QRect &a, const QRect &b)
+{
+    const auto near = [](int gap) { return gap <= Router::kMaxGap && gap >= -Router::kMaxGap; };
+    const bool alongY = a.top() <= b.bottom() && b.top() <= a.bottom();
+    const bool alongX = a.left() <= b.right() && b.left() <= a.right();
+    return (alongY && (near(b.left() - (a.right() + 1)) || near(a.left() - (b.right() + 1))))
+           || (alongX && (near(b.top() - (a.bottom() + 1)) || near(a.top() - (b.bottom() + 1))));
+}
+} // namespace
+
+bool Router::canReach(const QByteArray &from, const QByteArray &to) const
+{
+    const auto hasScreens = [this](const QByteArray &device) {
+        return std::any_of(m_screens.begin(), m_screens.end(), [&](const Screen &s) { return s.device == device; });
+    };
+    if (!hasScreens(from) || !hasScreens(to))
+        return false;
+    QSet<QByteArray> seen{from};
+    QList<QByteArray> queue{from};
+    while (!queue.isEmpty()) {
+        const QByteArray device = queue.takeFirst();
+        if (device == to)
+            return true;
+        for (const Screen &a : m_screens) {
+            if (a.device != device)
+                continue;
+            for (const Screen &b : m_screens) {
+                if (b.device != device && !seen.contains(b.device) && touches(a.global, b.global)) {
+                    seen.insert(b.device);
+                    queue.append(b.device);
+                }
+            }
+        }
+    }
+    return false;
 }
 
 QPoint Router::primaryCenter(const QByteArray &device) const

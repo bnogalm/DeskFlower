@@ -12,13 +12,21 @@ if(APPLE)
     # Drag-and-drop disk image with the app bundles (agent and session helper) and bin/.
     set(CPACK_GENERATOR "DragNDrop")
     set(CPACK_DMG_VOLUME_NAME "DeskFlower")
+    # The system in the name, for people choosing among the downloads.
+    set(CPACK_PACKAGE_FILE_NAME "deskflower-${PROJECT_VERSION}-macOS-${CMAKE_SYSTEM_PROCESSOR}")
 elseif(UNIX)
     # Self-contained install in /opt/deskflower (Qt is deployed next to the executables).
     set(CPACK_GENERATOR "DEB")
     set(CPACK_PACKAGING_INSTALL_PREFIX "/opt/deskflower")
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
     set(CPACK_DEBIAN_PACKAGE_SECTION "utils")
-    set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+    # The system in the name, for people choosing among the downloads.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(_deb_arch arm64)
+    else()
+        set(_deb_arch amd64)
+    endif()
+    set(CPACK_DEBIAN_FILE_NAME "deskflower_${PROJECT_VERSION}-Linux-${_deb_arch}.deb")
     # Maintainer scripts get 0755 even when the sources come from a file system without the x bit.
     set(CPACK_DEBIAN_PACKAGE_CONTROL_STRICT_PERMISSION TRUE)
     set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA

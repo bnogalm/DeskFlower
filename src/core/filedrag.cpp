@@ -437,7 +437,7 @@ void FileDrag::dropHere(const QByteArray &source, quint64 offer, int count, qint
                 reportTo(source, offer, false, tr("Could not put every file in %1").arg(QDir::toNativeSeparators(folder)));
                 return;
             }
-            qCInfo(lcDrag) << "Received" << count << "dragged files into" << folder;
+            qCInfo(lcDrag) << "Received" << count << "dragged files";
             reportTo(source, offer, true, {});
         });
     });

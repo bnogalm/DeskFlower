@@ -131,6 +131,19 @@ ServiceController::ServiceController(Node *node, Workspace *workspace, InputCont
         broadcast(ev);
     });
 
+    connect(m_input, &InputController::inputRefused, this, [this](const QByteArray &device) {
+        QString name = QString::fromLatin1(device.toHex().left(8));
+        for (const PeerView &p : m_node->peers()) {
+            if (p.id == device)
+                name = p.name;
+        }
+        QCborMap ev = makeEvent(QStringLiteral("notice"));
+        ev.insert(QStringLiteral("message"),
+                  tr("%1 cannot take the keyboard and mouse right now (is DeskFlower running there?)").arg(name));
+        ev.insert(QStringLiteral("problem"), true);
+        broadcast(ev);
+    });
+
     m_stateTimer.setSingleShot(true);
     m_stateTimer.setInterval(30);
     connect(&m_stateTimer, &QTimer::timeout, this, [this] { broadcast(stateEvent()); });

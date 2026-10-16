@@ -80,6 +80,16 @@ ApplicationWindow {
 
                 Menu {
                     id: appMenu
+                    // As wide as the longest entry (the default width cuts them off).
+                    width: {
+                        let widest = 0
+                        for (let i = 0; i < count; ++i) {
+                            const item = itemAt(i)
+                            if (item)
+                                widest = Math.max(widest, item.implicitWidth)
+                        }
+                        return Math.max(widest, 200)
+                    }
                     MenuItem {
                         text: qsTr("Start DeskFlower when I sign in")
                         checkable: true
@@ -100,6 +110,10 @@ ApplicationWindow {
                         }
                     }
                     MenuSeparator {}
+                    MenuItem {
+                        text: qsTr("Download the latest version…")
+                        onTriggered: Qt.openUrlExternally(window.backend.downloadsUrl)
+                    }
                     MenuItem {
                         text: qsTr("About DeskFlower")
                         onTriggered: aboutDialog.open()

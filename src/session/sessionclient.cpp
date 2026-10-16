@@ -94,6 +94,12 @@ SessionClient::SessionClient(const QString &instance, const QByteArray &token, I
         a.insert(QStringLiteral("lb"), m_input->leftButtonHeld()); // a drag may be crossing
         send(QStringLiteral("edge"), a);
     });
+    connect(m_input, &InputBackend::captureLost, this, [this](QPoint at) {
+        QCborMap a;
+        a.insert(QStringLiteral("x"), at.x());
+        a.insert(QStringLiteral("y"), at.y());
+        send(QStringLiteral("captureLost"), a);
+    });
     connect(m_input, &InputBackend::localRelease, this, [this](QPoint at) {
         QCborMap a;
         a.insert(QStringLiteral("x"), at.x());
