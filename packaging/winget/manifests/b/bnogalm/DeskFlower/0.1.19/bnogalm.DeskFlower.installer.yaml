@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 PackageIdentifier: bnogalm.DeskFlower
 PackageVersion: 0.1.19
 InstallerType: wix
@@ -15,4 +15,4 @@ Installers:
   InstallerUrl: https://github.com/bnogalm/DeskFlower/releases/download/v0.1.19/Deskflower-0.1.19-Windows-x64.msi
   InstallerSha256: 82BA7CCFB7FDCFD150B27312E205E67C87CBC94CC3288B7971617C210C62AB41
 ManifestType: installer
-ManifestVersion: 1.10.0
+ManifestVersion: 1.12.0
