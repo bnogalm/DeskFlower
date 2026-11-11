@@ -55,6 +55,12 @@ public:
     static constexpr int kChunk = 60 * 1024;
     static constexpr qint64 kHighWater = 1024 * 1024;
     static constexpr int kIdleTimeoutMs = 30000;
+    // A download that advances by less than this many bytes in this long is given up, so a paired
+    // device chosen as the source cannot pin the updater in Downloading with a trickle. The first
+    // window starts with the first byte of the package: until then (connecting, the source opening
+    // and checking its package) only the idle timer and the total deadline apply.
+    static constexpr int kMinProgressWindowMs = 30000;
+    static constexpr qint64 kMinProgressBytes = 64 * 1024;
 
     struct Options {
         QString storeDir;           // <config dir>/updates
@@ -62,7 +68,9 @@ public:
         QString version;            // build::version()
         QString platform;           // build::platform()
         qint64 maxPackageBytes = qint64(512) * 1024 * 1024;
-        int minRequestIntervalMs = 10000; // serving side, per peer
+        int minRequestIntervalMs = 10000;         // serving side, per peer
+        int totalDeadlineMs = 15 * 60 * 1000;     // whole download, from update() to the last byte
+        int minProgressWindowMs = kMinProgressWindowMs; // tests shorten it
         static Options defaults(const QString &storeDir);
     };
 
@@ -82,10 +90,16 @@ public:
     const std::optional<update::Manifest> &servedPackage() const { return m_served; }
     // Version a paired peer offers that would update this device (empty: nothing to offer).
     QString offeredUpdate(const PeerView &peer) const;
+    // Whether this device's package would update `peer` (its platform, a newer version): the
+    // peer can take it with its own Update action.
+    bool servesUpdateFor(const PeerView &peer) const;
 
     // Downloads, verifies and installs the peer's package. False (with the reason) if it cannot start;
     // otherwise finished() follows.
     bool update(const QByteArray &peerId, QString *error);
+    // Stops a download in progress (finished(peer, false, "Cancelled") follows). No effect while
+    // verifying or installing (the package is already here and locked) or when idle.
+    void cancel();
     State state() const { return m_state; }
     QByteArray peer() const { return m_peer; }
     QString targetVersion() const { return m_manifest ? m_manifest->version : QString(); }
@@ -134,6 +148,9 @@ private:
     QFile m_file;
     qint64 m_received = 0;
     QTimer m_idle;
+    QTimer m_deadline;      // whole-download deadline (Options::totalDeadlineMs)
+    qint64 m_windowStart = -1; // start of the current minimum-progress window (-1: no byte yet)
+    qint64 m_windowBytes = 0; // m_received at the window's start
     std::unique_ptr<QFile> m_locked; // the verified package, kept read-only until we exit
 };
 

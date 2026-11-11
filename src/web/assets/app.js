@@ -165,7 +165,10 @@ async function upload(file) {
   try {
     do {
       const chunk = file.slice(offset, offset + CHUNK);
-      const query = new URLSearchParams({ path: dir, name: file.name || 'photo.jpg', offset, total: file.size });
+      // Percent-encoded by hand: URLSearchParams would write a space as '+', which the server
+      // keeps literally (a folder "My docs" would not be found).
+      const query = `path=${encodeURIComponent(dir)}&name=${encodeURIComponent(file.name || 'photo.jpg')}`
+        + `&offset=${offset}&total=${file.size}`;
       let response;
       try {
         response = await api(`/api/upload?${query}`, { method: 'PUT', body: chunk });

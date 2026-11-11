@@ -1,14 +1,16 @@
 // Wayland input backend (GNOME 45+, KDE Plasma 6+), through xdg-desktop-portal and libei.
-//  - Injection: RemoteDesktop portal via liboeffis (asks the user once per session), then a libei
-//    *sender* context: absolute pointer (logical coordinates), buttons, scroll and keys.
+//  - Injection: the helper's RemoteDesktop portal session (PortalSession: asked once, then
+//    restored without a dialog), ConnectToEIS, then a libei *sender* context: absolute pointer
+//    (logical coordinates), buttons, scroll and keys.
 //  - Capture: InputCapture portal. Pointer barriers are placed on the outer edges of the desktop
 //    zones; when the cursor hits one the compositor activates the capture and delivers input to a
 //    libei *receiver* context until we call Release (with the position to put the cursor back).
-// NOTE: written without a Linux build environment; see the README.
+// Either part failing is reported (problem()): the agent shows why sharing does not work here.
 
 #include "inputbackend.h"
 #include "keymap.h"
 #include "linuxbackends.h"
+#include "portalsession.h"
 
 #include <QDBusArgument>
 #include <QDBusConnection>
@@ -24,6 +26,7 @@
 #include <QRandomGenerator>
 #include <QRect>
 #include <QSocketNotifier>
+#include <QStringList>
 #include <QTimer>
 
 #include <cmath>
@@ -34,7 +37,6 @@
 
 extern "C" {
 #include <libei.h>
-#include <liboeffis.h>
 }
 
 Q_LOGGING_CATEGORY(lcWayland, "deskflower.input.wayland")
@@ -102,8 +104,6 @@ public:
             ei_unref(m_sender);
         if (m_receiver)
             ei_unref(m_receiver);
-        if (m_oeffis)
-            oeffis_unref(m_oeffis);
     }
 
     bool start() override
@@ -115,13 +115,23 @@ public:
 
     bool isCapturing() const override { return m_capturing; }
 
+    QString problem() const override
+    {
+        QStringList parts;
+        if (!m_emulationProblem.isEmpty())
+            parts.append(m_emulationProblem);
+        if (!m_captureProblem.isEmpty())
+            parts.append(m_captureProblem);
+        return parts.join(QLatin1Char(' '));
+    }
+
     void setReportEdges(bool report) override
     {
         m_reportEdges = report;
         applyBarriers();
     }
 
-    void setCapture(bool on, QPoint returnTo) override
+    void setCapture(bool on, QPoint returnTo, int /*guardSide*/) override
     {
         if (on) {
             m_captureAccepted = true; // keep the compositor's capture
@@ -213,7 +223,7 @@ private slots:
             return;
         }
         m_activationTimer.start();
-        emit edgeHit(side, m_activationCursor.toPoint());
+        emit edgeHit(side, m_activationCursor.toPoint(), false);
     }
 
     void onDeactivated(const QDBusObjectPath &session, const QVariantMap &)
@@ -248,45 +258,64 @@ private slots:
                                                  SLOT(onRequestResponse(uint, QVariantMap)));
         if (response != 0) {
             qCWarning(lcWayland) << "Portal request" << path << "was refused or cancelled:" << response;
+            setCaptureProblem(tr("The desktop did not let DeskFlower capture this keyboard and mouse (input capture "
+                                 "portal), so this computer cannot be the master."));
             return;
         }
         callback(results);
     }
 
 private:
-    // --- Emulation (RemoteDesktop portal through liboeffis) ---------------------------------
+    void setEmulationProblem(const QString &problem)
+    {
+        if (problem == m_emulationProblem)
+            return;
+        m_emulationProblem = problem;
+        emit problemChanged();
+    }
+
+    void setCaptureProblem(const QString &problem)
+    {
+        if (problem == m_captureProblem)
+            return;
+        m_captureProblem = problem;
+        emit problemChanged();
+    }
+
+    // --- Emulation (the helper's RemoteDesktop portal session) ------------------------------
 
     void startEmulation()
     {
-        m_oeffis = oeffis_new(nullptr);
-        if (!m_oeffis)
-            return;
-        auto *notifier = new QSocketNotifier(oeffis_get_fd(m_oeffis), QSocketNotifier::Read, this);
-        connect(notifier, &QSocketNotifier::activated, this, [this] { dispatchOeffis(); });
-        oeffis_create_session(m_oeffis, OEFFIS_DEVICE_KEYBOARD | OEFFIS_DEVICE_POINTER);
-    }
-
-    void dispatchOeffis()
-    {
-        oeffis_dispatch(m_oeffis);
-        for (enum oeffis_event_type e = oeffis_get_event(m_oeffis); e != OEFFIS_EVENT_NONE;
-             e = oeffis_get_event(m_oeffis)) {
-            switch (e) {
-            case OEFFIS_EVENT_CONNECTED_TO_EIS:
-                setUpSender(oeffis_get_eis_fd(m_oeffis));
-                break;
-            case OEFFIS_EVENT_CLOSED:
-            case OEFFIS_EVENT_DISCONNECTED:
-                qCWarning(lcWayland) << "Remote desktop session ended:" << oeffis_get_error_message(m_oeffis);
-                break;
-            default:
-                break;
+        PortalSession *portal = PortalSession::instance();
+        auto ready = [this, portal] {
+            if (!portal->inputGranted()) {
+                setEmulationProblem(tr("The desktop did not allow controlling the keyboard and mouse."));
+                return;
             }
-        }
+            const int fd = portal->connectToEis();
+            if (fd < 0) {
+                setEmulationProblem(tr("The desktop gave no input connection (remote desktop portal without libei "
+                                       "support; GNOME 46+ or KDE Plasma 6.1+ is needed)."));
+                return;
+            }
+            setEmulationProblem({});
+            setUpSender(fd);
+        };
+        connect(portal, &PortalSession::started, this, ready);
+        connect(portal, &PortalSession::failed, this, [this](const QString &why) { setEmulationProblem(why); });
+        connect(portal, &PortalSession::closed, this, [this, portal] { setEmulationProblem(portal->problem()); });
+        if (portal->state() == PortalSession::State::Started)
+            ready();
+        else
+            portal->start();
     }
 
     void setUpSender(int fd)
     {
+        if (m_sender) {
+            ei_unref(m_sender);
+            m_sender = nullptr;
+        }
         m_sender = ei_new_sender(nullptr);
         ei_configure_name(m_sender, "DeskFlower");
         if (ei_setup_backend_fd(m_sender, fd) != 0) {
@@ -519,6 +548,10 @@ private:
         }
     }
 
+    // No local paste gestures (InputBackend::localPasteGesture) here: libei delivers events to the
+    // sender context only while this device holds the capture, so there is no cheap stream of
+    // local-only input. reportsLocalPresses() stays false (localPressSupport off), and a Wayland
+    // device relies on input forwarded by the master, or on Receive, to get file data.
     void handleCaptured(ei_event *e)
     {
         if (!m_capturing)
@@ -585,15 +618,20 @@ private:
         QDBusMessage call = QDBusMessage::createMethodCall(kPortalService, kPortalPath, kInputCapture, method);
         call.setArguments(finalArgs);
         auto *watcher = new QDBusPendingCallWatcher(bus.asyncCall(call), this);
-        connect(watcher, &QDBusPendingCallWatcher::finished, this, [method](QDBusPendingCallWatcher *w) {
-            if (w->isError())
+        connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, method](QDBusPendingCallWatcher *w) {
+            if (w->isError()) {
                 qCWarning(lcWayland) << "InputCapture." << method << "failed:" << w->error().message();
+                setCaptureProblem(tr("This desktop has no input capture portal (GNOME 45+ or KDE Plasma 6.1+), so "
+                                     "this computer cannot be the master."));
+            }
             w->deleteLater();
         });
     }
 
+    QString m_emulationProblem;
+    QString m_captureProblem;
+
     // Emulation.
-    oeffis *m_oeffis = nullptr;
     ei *m_sender = nullptr;
     std::set<ei_device *> m_senderDevices;
     uint32_t m_sequence = 0;

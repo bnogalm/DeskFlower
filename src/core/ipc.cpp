@@ -14,6 +14,8 @@ QString serverName(const QString &instance)
     return QStringLiteral("deskflower-%1").arg(instance.isEmpty() ? QStringLiteral("default") : instance);
 }
 
+QString renderServerName(const QString &instance) { return serverName(instance) + QStringLiteral("-render"); }
+
 Connection::Connection(QLocalSocket *socket, QObject *parent) : QObject(parent), m_socket(socket)
 {
     connect(m_socket, &QLocalSocket::readyRead, this, &Connection::onReadyRead);

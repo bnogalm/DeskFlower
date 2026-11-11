@@ -107,20 +107,23 @@ std::optional<TransportKeys> IKInitiator::readMessage2(const QByteArray &message
     if (message.size() < kMessage2Overhead)
         return std::nullopt;
     const QByteArray re = message.left(32);
-    m_ss.mixHash(re);
+    // Mixed into a copy: the member state is committed only once the message authenticates.
+    SymmetricState ss = m_ss;
+    ss.mixHash(re);
     // ee
     const auto ee = crypto::dh(m_e.secretKey, re);
     if (!ee)
         return std::nullopt;
-    m_ss.mixKey(*ee);
+    ss.mixKey(*ee);
     // se: initiator static, responder ephemeral
     const auto se = crypto::dh(m_s.secretKey, re);
     if (!se)
         return std::nullopt;
-    m_ss.mixKey(*se);
-    auto pt = m_ss.decryptAndHash(message.mid(32));
+    ss.mixKey(*se);
+    auto pt = ss.decryptAndHash(message.mid(32));
     if (!pt)
         return std::nullopt;
+    m_ss = ss;
     if (payload)
         *payload = *pt;
     TransportKeys keys;

@@ -4,7 +4,8 @@
 // (<config dir>/settings.json). Keys in use:
 //   shareClipboard (bool), sharedFolder (string), phoneAccess (bool), phonePort (int),
 //   remoteView (bool, default true: Advanced settings), dataPort (int), discoveryPort (int), logging (bool, default false: no log files; only set by
-//   hand in the file, see installFileLogging)
+//   hand in the file, see installFileLogging), swapCtrlCmd (array of hex device ids: Control and
+//   Command swapped when typing on them, see InputController::setSwapCtrlCmd)
 
 #include <QJsonObject>
 #include <QObject>

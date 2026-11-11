@@ -9,6 +9,10 @@
 
 #include <algorithm>
 
+#ifdef Q_OS_MACOS
+#include "screengrabber.h"
+#endif
+
 #ifdef Q_OS_WIN
 #include <QtGui/qguiapplication_platform.h>
 #include <QtGui/qscreen_platform.h>
@@ -124,13 +128,33 @@ QCborArray describe()
     return list;
 }
 
+namespace {
+std::function<QImage(const QRect &)> &captureSource()
+{
+    static std::function<QImage(const QRect &)> source;
+    return source;
+}
+} // namespace
+
+void setCaptureSource(std::function<QImage(const QRect &)> source)
+{
+    captureSource() = std::move(source);
+}
+
 QByteArray captureThumbnail(QScreen *screen, int maxWidth, int maxHeight)
 {
-    const QPixmap shot = screen->grabWindow(0);
-    if (shot.isNull())
+    QImage full;
+    if (captureSource())
+        full = captureSource()(nativeGeometry(screen)); // a Wayland session's PipeWire streams
+#ifdef Q_OS_MACOS
+    if (full.isNull())
+        full = captureScreenImage(nativeGeometry(screen)); // ScreenCaptureKit where available
+#endif
+    if (full.isNull() && !captureSource())
+        full = screen->grabWindow(0).toImage();
+    if (full.isNull())
         return {};
-    const QImage image =
-        shot.toImage().scaled(maxWidth, maxHeight, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    const QImage image = full.scaled(maxWidth, maxHeight, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     QByteArray jpeg;
     QBuffer buffer(&jpeg);
     buffer.open(QIODevice::WriteOnly);

@@ -87,6 +87,7 @@ bool Identity::save() const
 bool PeerStore::load(const QString &configDir)
 {
     m_path = QDir(configDir).filePath(QStringLiteral("peers.json"));
+    m_forgottenPath = QDir(configDir).filePath(QStringLiteral("forgotten.json"));
     m_peers.clear();
     const QJsonArray arr = readJson(m_path).array();
     for (const QJsonValue &v : arr) {
@@ -100,7 +101,35 @@ bool PeerStore::load(const QString &configDir)
         p.pairedAt = QDateTime::fromString(o.value(QStringLiteral("pairedAt")).toString(), Qt::ISODate);
         p.allowView = o.value(QStringLiteral("allowView")).toBool();
         p.owner = o.value(QStringLiteral("owner")).toString();
+        p.lastAddress = o.value(QStringLiteral("address")).toString();
+        p.lastPort = quint16(o.value(QStringLiteral("port")).toInt());
+        for (const QJsonValue &e : o.value(QStringLiteral("addresses")).toArray()) {
+            const QJsonObject eo = e.toObject();
+            StoredEndpoint ep;
+            ep.address = eo.value(QStringLiteral("a")).toString();
+            ep.port = quint16(eo.value(QStringLiteral("p")).toInt());
+            ep.tcpPort = quint16(eo.value(QStringLiteral("tp")).toInt());
+            const auto source = endpointSourceFromName(eo.value(QStringLiteral("src")).toString());
+            ep.lastOk = qint64(eo.value(QStringLiteral("ok")).toDouble());
+            if (ep.address.isEmpty() || !ep.port || !source || *source == EndpointSource::Beacon)
+                continue;
+            ep.source = *source;
+            p.endpoints.append(ep);
+        }
+        p.trust = o.value(QStringLiteral("guest")).toBool()   ? TrustLevel::Guest
+                  : o.value(QStringLiteral("group")).toBool() ? TrustLevel::Group
+                                                              : TrustLevel::Device;
+        p.introducedBy = unb64(o.value(QStringLiteral("introducedBy")));
+        p.everConnected = o.value(QStringLiteral("connected")).toBool();
         m_peers.insert(p.id, p);
+    }
+    m_forgotten.clear();
+    const QJsonArray forgotten = readJson(m_forgottenPath).array();
+    for (const QJsonValue &v : forgotten) {
+        const QJsonObject o = v.toObject();
+        const QByteArray id = v.isObject() ? unb64(o.value(QStringLiteral("id"))) : unb64(v);
+        if (!id.isEmpty())
+            m_forgotten.insert(id, o.value(QStringLiteral("name")).toString().left(64));
     }
     return true;
 }
@@ -114,6 +143,15 @@ const TrustedPeer *PeerStore::find(const QByteArray &id) const
 void PeerStore::upsert(const TrustedPeer &peer)
 {
     m_peers.insert(peer.id, peer);
+    save();
+}
+
+void PeerStore::upsertAll(const QList<TrustedPeer> &peers)
+{
+    if (peers.isEmpty())
+        return;
+    for (const TrustedPeer &peer : peers)
+        m_peers.insert(peer.id, peer);
     save();
 }
 
@@ -141,6 +179,91 @@ void PeerStore::setAllowView(const QByteArray &id, bool on)
     }
 }
 
+void PeerStore::setLastAddress(const QByteArray &id, const QString &address, quint16 port)
+{
+    auto it = m_peers.find(id);
+    if (it != m_peers.end() && (it->lastAddress != address || it->lastPort != port)) {
+        it->lastAddress = address;
+        it->lastPort = port;
+        save();
+    }
+}
+
+void PeerStore::setEndpoints(const QByteArray &id, const QList<StoredEndpoint> &endpoints)
+{
+    auto it = m_peers.find(id);
+    if (it != m_peers.end() && it->endpoints != endpoints) {
+        it->endpoints = endpoints;
+        save();
+    }
+}
+
+void PeerStore::setTrust(const QByteArray &id, TrustLevel level)
+{
+    auto it = m_peers.find(id);
+    if (it == m_peers.end() || it->trust == level)
+        return;
+    it->trust = level;
+    if (level == TrustLevel::Guest)
+        it->allowView = false; // a guest never views this screen
+    save();
+}
+
+void PeerStore::setConnectedOnce(const QByteArray &id)
+{
+    auto it = m_peers.find(id);
+    if (it != m_peers.end() && !it->everConnected) {
+        it->everConnected = true;
+        save();
+    }
+}
+
+QList<QByteArray> PeerStore::introducedBy(const QByteArray &introducer, bool neverConnected) const
+{
+    QList<QByteArray> out;
+    if (introducer.isEmpty())
+        return out;
+    for (const TrustedPeer &p : m_peers) {
+        if (p.introducedBy == introducer && (!neverConnected || !p.everConnected))
+            out.append(p.id);
+    }
+    return out;
+}
+
+int PeerStore::introducedCount() const
+{
+    int n = 0;
+    for (const TrustedPeer &p : m_peers)
+        n += p.introducedBy.isEmpty() ? 0 : 1;
+    return n;
+}
+
+void PeerStore::forget(const QByteArray &id, const QString &name)
+{
+    if (id.isEmpty() || (m_forgotten.contains(id) && m_forgotten.value(id) == name))
+        return;
+    m_forgotten.insert(id, name.left(64));
+    saveForgotten();
+}
+
+void PeerStore::unforget(const QByteArray &id)
+{
+    if (m_forgotten.remove(id))
+        saveForgotten();
+}
+
+bool PeerStore::saveForgotten() const
+{
+    QJsonArray arr;
+    for (auto it = m_forgotten.constBegin(); it != m_forgotten.constEnd(); ++it) {
+        QJsonObject o;
+        o.insert(QStringLiteral("id"), b64(it.key()));
+        o.insert(QStringLiteral("name"), it.value());
+        arr.append(o);
+    }
+    return writeJson(m_forgottenPath, QJsonDocument(arr));
+}
+
 void PeerStore::setOwner(const QByteArray &id, const QString &owner)
 {
     auto it = m_peers.find(id);
@@ -162,6 +285,33 @@ bool PeerStore::save() const
             o.insert(QStringLiteral("allowView"), true);
         if (!p.owner.isEmpty())
             o.insert(QStringLiteral("owner"), p.owner);
+        if (p.trust == TrustLevel::Guest)
+            o.insert(QStringLiteral("guest"), true);
+        else if (p.trust == TrustLevel::Group)
+            o.insert(QStringLiteral("group"), true);
+        if (!p.lastAddress.isEmpty()) {
+            o.insert(QStringLiteral("address"), p.lastAddress);
+            o.insert(QStringLiteral("port"), p.lastPort);
+        }
+        if (!p.endpoints.isEmpty()) {
+            QJsonArray addresses;
+            for (const StoredEndpoint &e : p.endpoints) {
+                QJsonObject eo;
+                eo.insert(QStringLiteral("a"), e.address);
+                eo.insert(QStringLiteral("p"), e.port);
+                if (e.tcpPort)
+                    eo.insert(QStringLiteral("tp"), e.tcpPort);
+                eo.insert(QStringLiteral("src"), endpointSourceName(e.source));
+                if (e.lastOk)
+                    eo.insert(QStringLiteral("ok"), double(e.lastOk));
+                addresses.append(eo);
+            }
+            o.insert(QStringLiteral("addresses"), addresses);
+        }
+        if (!p.introducedBy.isEmpty())
+            o.insert(QStringLiteral("introducedBy"), b64(p.introducedBy));
+        if (p.everConnected)
+            o.insert(QStringLiteral("connected"), true);
         arr.append(o);
     }
     return writeJson(m_path, QJsonDocument(arr));

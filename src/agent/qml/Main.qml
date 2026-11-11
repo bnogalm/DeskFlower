@@ -1,5 +1,6 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
 
@@ -10,6 +11,8 @@ ApplicationWindow {
     property int initialPage: 0       // 3: devices, with the advanced settings window open
     property bool startHidden: false  // --minimized: only the tray icon at first
     property bool hideOnClose: false  // with a system tray, closing hides the window
+    // The progress window (main.cpp places it on the screen).
+    readonly property alias progressWindow: progressWindow
 
     width: 820
     height: 720
@@ -29,7 +32,7 @@ ApplicationWindow {
     Material.primary: Material.BlueGrey
 
     header: ToolBar {
-        Material.background: Material.color(Material.BlueGrey, Material.Shade800)
+        Material.background: "#37474f"  // Material BlueGrey, Shade800
         Material.foreground: "white"
 
         RowLayout {
@@ -67,9 +70,11 @@ ApplicationWindow {
                 text: qsTr("Discovery")
                 checked: window.backend.exploring
                 enabled: window.backend.serviceConnected
+                // toggle() puts the switch back without removing its binding (a click does not
+                // either): it changes when the service reports the new state.
                 onToggled: {
                     window.backend.setExploring(checked)
-                    checked = Qt.binding(() => window.backend.exploring)
+                    toggle()
                 }
             }
 
@@ -97,7 +102,7 @@ ApplicationWindow {
                         enabled: window.backend.serviceConnected && window.backend.autostartSupported
                         onTriggered: {
                             window.backend.setAutostart(checked)
-                            checked = Qt.binding(() => window.backend.autostart)
+                            toggle() // back until the service reports it, binding kept (as above)
                         }
                     }
                     MenuItem {
@@ -130,7 +135,7 @@ ApplicationWindow {
         Pane {
             visible: !window.backend.serviceConnected
             Layout.fillWidth: true
-            Material.background: Material.color(Material.Orange, Material.Shade100)
+            Material.background: "#ffe0b2"  // Material Orange, Shade100
             RowLayout {
                 anchors.fill: parent
                 spacing: 12
@@ -149,10 +154,123 @@ ApplicationWindow {
             }
         }
 
+        // The session helper cannot share this computer's keyboard, mouse or screen (no display,
+        // the desktop refused remote control, a missing macOS permission...): say why instead of
+        // failing silently, with the system setting that fixes it where there is one.
+        Pane {
+            visible: window.backend.serviceConnected && window.backend.inputProblem !== ""
+            Layout.fillWidth: true
+            Material.background: "#ffe0b2"  // Material Orange, Shade100
+            RowLayout {
+                anchors.fill: parent
+                spacing: 12
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: "#5d3a00"
+                    // The macOS helper's texts say what to allow; the others name what failed.
+                    text: Qt.platform.os === "osx"
+                          ? window.backend.inputProblem
+                          : qsTr("Keyboard and mouse sharing does not work on this computer: %1")
+                            .arg(window.backend.inputProblem)
+                }
+                Button {
+                    visible: "" + window.backend.inputProblemLink !== "" // the link as text
+                    text: qsTr("Open System Settings")
+                    onClicked: Qt.openUrlExternally(window.backend.inputProblemLink)
+                }
+            }
+        }
+
+        // A connected paired device of another protocol: file transfers with it are refused until
+        // one of the two is updated. An older device can take this device's package with its own
+        // Update button (it sees the offer in our hello); a newer one may offer its package here.
+        Repeater {
+            model: window.backend.protocolAlerts
+            delegate: Pane {
+                id: protocolBanner
+                visible: window.backend.serviceConnected
+                required property peerInfo modelData
+                readonly property bool older: modelData.protocolMismatch === "older"
+                readonly property bool canUpdateHere: !older && modelData.update !== ""
+                                                      && window.backend.updatesConfigured
+                                                      && window.backend.updatesSupported
+                Layout.fillWidth: true
+                Material.background: "#ffe0b2"  // Material Orange, Shade100
+                RowLayout {
+                    anchors.fill: parent
+                    spacing: 12
+                    Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        color: "#5d3a00"
+                        textFormat: Text.StyledText
+                        text: {
+                            const name = protocolBanner.modelData.name || protocolBanner.modelData.shortId
+                            if (!protocolBanner.older)
+                                return qsTr("<b>%1</b> uses a newer protocol (version %2). The protocol has changed: update this device.")
+                                    .arg(name).arg(protocolBanner.modelData.protocol)
+                            const base = qsTr("<b>%1</b> uses an older protocol (version %2). The protocol has changed: update it.")
+                                .arg(name).arg(protocolBanner.modelData.protocol)
+                            return protocolBanner.modelData.canServeUpdate
+                                ? base + " " + qsTr("On %1, click Update on the Devices tab: this device can send it the update.").arg(name)
+                                : base
+                        }
+                    }
+                    Button {
+                        visible: protocolBanner.canUpdateHere
+                        enabled: window.backend.updateState === ""
+                        text: qsTr("Update")
+                        onClicked: window.backend.updateFrom(protocolBanner.modelData.id)
+                    }
+                    Button {
+                        visible: !protocolBanner.canUpdateHere && !protocolBanner.modelData.canServeUpdate
+                        flat: true
+                        text: qsTr("Downloads")
+                        onClicked: Qt.openUrlExternally(window.backend.downloadsUrl)
+                    }
+                }
+            }
+        }
+
+        // Keyboard diagnostics record the keys that go between devices: always shown while on.
+        Pane {
+            visible: window.backend.keyDiagnosticsAvailable && window.backend.serviceConnected
+                     && window.backend.keyDiagActive
+            Layout.fillWidth: true
+            Material.background: "#ffecb3"  // Material Amber, Shade100
+            RowLayout {
+                anchors.fill: parent
+                spacing: 12
+                Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    color: "#4d3800"
+                    text: window.backend.keyDiagBy !== ""
+                          ? qsTr("Keyboard diagnostics asked by %1: the keys that go between devices are being recorded.")
+                            .arg(window.backend.keyDiagBy)
+                          : qsTr("Keyboard diagnostics: the keys that go between devices are being recorded.")
+                }
+                Button {
+                    text: qsTr("Show")
+                    flat: true
+                    onClicked: {
+                        advancedSettings.show()
+                        advancedSettings.raise()
+                        advancedSettings.requestActivate()
+                    }
+                }
+                Button {
+                    text: qsTr("Stop")
+                    onClicked: window.backend.setKeyDiagnostics(false)
+                }
+            }
+        }
+
         Pane {
             visible: window.backend.serviceConnected && window.backend.screenViewerName !== ""
             Layout.fillWidth: true
-            Material.background: Material.color(Material.Teal, Material.Shade100)
+            Material.background: "#b2dfdb"  // Material Teal, Shade100
             RowLayout {
                 anchors.fill: parent
                 spacing: 12
@@ -166,6 +284,32 @@ ApplicationWindow {
                 Button {
                     text: qsTr("Stop")
                     onClicked: window.backend.stopScreenView()
+                }
+            }
+        }
+
+        // Files being received from another device (a paste or a drag), with a way to stop them.
+        // Light theme like the other banners, whatever the system's: dark text on the light strip.
+        // Compact: one line per transfer (title, progress, Cancel).
+        Pane {
+            visible: transferRows.count > 0 // one row per transfer (the list's length does not compile)
+            Layout.fillWidth: true
+            topPadding: 2
+            bottomPadding: 2
+            leftPadding: 16
+            rightPadding: 8
+            Material.theme: Material.Light
+            Material.background: "#eceff1"  // Material BlueGrey, Shade50
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 0
+                Repeater {
+                    id: transferRows
+                    model: window.backend.transfers
+                    delegate: TransferRow {
+                        backend: window.backend
+                        Layout.fillWidth: true
+                    }
                 }
             }
         }
@@ -214,27 +358,27 @@ ApplicationWindow {
                       ? qsTr("DeskFlower %1  ·  UDP %2").arg(window.backend.selfVersion).arg(window.backend.port) : ""
             }
             Label {
+                id: supportNotice
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
                 font.pixelSize: 14
                 textFormat: Text.StyledText
-                linkColor: Material.accent
+                linkColor: Material.accentColor
                 text: qsTr("Free for personal use. Using it for work, or want to support it? "
                            + "<a href=\"https://ko-fi.com/bnogal\">Ko-fi ♥</a>")
                 onLinkActivated: link => Qt.openUrlExternally(link)
 
                 HoverHandler {
-                    enabled: parent.hoveredLink !== ""
+                    enabled: supportNotice.hoveredLink !== ""
                     cursorShape: Qt.PointingHandCursor
                 }
             }
             Bouquet {
                 Layout.alignment: Qt.AlignRight | Qt.AlignBottom
-                deviceIds: [window.backend.selfId].concat(window.backend.trustedPeers
-                                                         .filter(p => p.connected).map(p => p.id))
-                                                 .filter(id => !!id)
-                running: window.visible && window.visibility !== Window.Minimized
+                deviceIds: window.backend.connectedIds
+                // Also still while files arrive (see Backend::transferBusy).
+                running: window.visible && window.visibility !== Window.Minimized && !window.backend.transferBusy
             }
         }
     }
@@ -243,6 +387,7 @@ ApplicationWindow {
         id: pinDisplay
         anchors.centerIn: parent
         onCancelRequested: window.backend.cancelPair(peerId)
+        onTrustChosen: trust => window.backend.setPairTrust(peerId, trust)
     }
 
     PinEntryDialog {
@@ -256,6 +401,12 @@ ApplicationWindow {
         id: viewRequest
         anchors.centerIn: parent
         onAnswered: decision => window.backend.answerView(peerId, decision)
+    }
+
+    // DeskFlower's own progress window for pasted files (and Receive), shown on its own.
+    TransferWindow {
+        id: progressWindow
+        backend: window.backend
     }
 
     AdvancedSettingsWindow {
@@ -294,43 +445,43 @@ ApplicationWindow {
 
     Connections {
         target: window.backend
-        function onPinShown(peerId, peerName, pin) {
+        function onPinShown(peerId: string, peerName: string, pin: string, trust: string, suggested: string): void {
             pinEntry.close()
-            pinDisplay.show(peerId, peerName, pin)
+            pinDisplay.show(peerId, peerName, pin, trust, suggested)
         }
-        function onPinRequested(peerId, peerName) {
+        function onPinRequested(peerId: string, peerName: string, trust: string): void {
             pinDisplay.close()
-            pinEntry.show(peerId, peerName)
+            pinEntry.show(peerId, peerName, trust)
         }
-        function onViewPromptRequested(peerId, peerName, timeoutMs) {
+        function onViewPromptRequested(peerId: string, peerName: string, timeoutMs: int): void {
             viewRequest.show(peerId, peerName, timeoutMs)
         }
-        function onViewPromptClosed(peerId) {
+        function onViewPromptClosed(peerId: string): void {
             if (viewRequest.peerId === peerId)
                 viewRequest.close()
         }
-        function onServiceConnectedChanged() {
+        function onServiceConnectedChanged(): void {
             // An answer could not reach the service; it replays the prompt on reconnection.
             if (!window.backend.serviceConnected)
                 viewRequest.close()
         }
-        function onPhoneUploaded(fileName) {
+        function onPhoneUploaded(fileName: string): void {
             toast.text = qsTr("Received from the phone: %1").arg(fileName)
             toast.open()
         }
-        function onNotice(message, problem) {
+        function onNotice(message: string, problem: bool): void {
             toast.text = message
             toast.open()
         }
-        function onServiceError(message) {
+        function onServiceError(message: string): void {
             toast.text = message
             toast.open()
         }
-        function onUpdateFinished(ok, message) {
+        function onUpdateFinished(ok: bool, message: string): void {
             toast.text = message
             toast.open()
         }
-        function onPairingFinished(peerId, ok, error) {
+        function onPairingFinished(peerId: string, ok: bool, error: string): void {
             pinDisplay.close()
             pinEntry.close()
             toast.text = ok ? qsTr("Paired successfully") : qsTr("Pairing failed: %1").arg(error)

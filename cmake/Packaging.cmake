@@ -9,7 +9,8 @@ set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_CONTACT "DeskFlower")
 
 if(APPLE)
-    # Drag-and-drop disk image with the app bundles (agent and session helper) and bin/.
+    # Drag-and-drop disk image: DeskFlower.app (every program inside, cmake/MacBundle.cmake), a link
+    # to /Applications and the license texts.
     set(CPACK_GENERATOR "DragNDrop")
     set(CPACK_DMG_VOLUME_NAME "DeskFlower")
     # The system in the name, for people choosing among the downloads.

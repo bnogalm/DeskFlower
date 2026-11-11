@@ -2,17 +2,22 @@
 //  - Edge detection and locally held keys/buttons: XInput2 raw events on the root window (they
 //    arrive whatever window has the focus).
 //  - Capture: pointer and keyboard grab on the root window with an invisible cursor; the pointer is
-//    warped back to a parking point after every motion and the offset is the relative motion.
+//    warped back to a parking point after every motion and the offset is the relative motion. Both
+//    grabs or none: a grab another client holds (a menu, a drag in progress, a screen locker) is
+//    retried for a moment, then the capture is given up (captureLost) instead of half-capturing,
+//    which would send the keys to both computers.
 //  - Injection: XTest. Coordinates are root window pixels (the ones XRandR reports).
-// NOTE: written without a Linux build environment; see the README.
+//  - Cursor hiding while another device has the pointer: XFixes.
 
 #include "inputbackend.h"
+#include "clock.h"
 #include "keymap.h"
 #include "linuxbackends.h"
 
-#include <QDateTime>
+#include <QCoreApplication>
 #include <QLoggingCategory>
 #include <QSocketNotifier>
+#include <QTimer>
 
 #include <set>
 #include <vector>
@@ -22,6 +27,7 @@
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/XTest.h>
+#include <X11/extensions/Xfixes.h>
 #include <X11/extensions/Xrandr.h>
 
 Q_LOGGING_CATEGORY(lcX11Input, "deskflower.input.x11")
@@ -30,6 +36,12 @@ namespace {
 
 constexpr qint64 kEdgeThrottleMs = 15;
 constexpr int kWheelStep = 120;
+// A grab held by another client is retried this often, this many times (a drag source lets go of
+// the pointer as soon as the drag is cancelled; a menu closes...).
+constexpr int kGrabRetryMs = 50;
+constexpr int kGrabAttempts = 10;
+// After coming back through an edge, it does not capture early again for this long.
+constexpr qint64 kReturnGuardMs = 250;
 
 struct Rect {
     int x, y, w, h;
@@ -39,17 +51,24 @@ struct Rect {
 class X11InputBackend : public InputBackend
 {
 public:
-    explicit X11InputBackend(QObject *parent) : InputBackend(parent) {}
+    X11InputBackend(QObject *parent, X11BackendOptions options) : InputBackend(parent), m_options(options)
+    {
+        m_grabRetry.setSingleShot(true);
+        m_grabRetry.setInterval(kGrabRetryMs);
+        connect(&m_grabRetry, &QTimer::timeout, this, [this] { tryGrab(); });
+    }
 
     ~X11InputBackend() override
     {
         if (!m_display)
             return;
         releaseAll();
-        if (m_capturing) {
+        if (m_capturing || m_grabPending) {
             XUngrabKeyboard(m_display, CurrentTime);
             XUngrabPointer(m_display, CurrentTime);
         }
+        if (m_cursorHidden && m_hasXFixes)
+            XFixesShowCursor(m_display, m_root);
         if (m_blankCursor)
             XFreeCursor(m_display, m_blankCursor);
         XCloseDisplay(m_display);
@@ -58,31 +77,23 @@ public:
     bool start() override
     {
         m_display = XOpenDisplay(nullptr);
-        if (!m_display) {
-            qCWarning(lcX11Input) << "Cannot open the X display";
-            return false;
-        }
+        if (!m_display)
+            return fail(tr("Cannot open the X display"));
         m_root = DefaultRootWindow(m_display);
 
         int event = 0, error = 0;
-        if (!XQueryExtension(m_display, "XInputExtension", &m_xiOpcode, &event, &error)) {
-            qCWarning(lcX11Input) << "XInput extension missing";
-            return false;
-        }
+        if (!XQueryExtension(m_display, "XInputExtension", &m_xiOpcode, &event, &error))
+            return fail(tr("The X server has no XInput extension"));
         int major = 2, minor = 2;
-        if (XIQueryVersion(m_display, &major, &minor) != Success) {
-            qCWarning(lcX11Input) << "XInput 2.2 is required";
-            return false;
-        }
+        if (XIQueryVersion(m_display, &major, &minor) != Success)
+            return fail(tr("The X server does not support XInput 2.2"));
         int xtestEvent = 0, xtestError = 0, xtestMajor = 0, xtestMinor = 0;
-        if (!XTestQueryExtension(m_display, &xtestEvent, &xtestError, &xtestMajor, &xtestMinor)) {
-            qCWarning(lcX11Input) << "XTest extension missing";
-            return false;
-        }
-        if (!XRRQueryExtension(m_display, &m_randrEvent, &error)) {
-            qCWarning(lcX11Input) << "XRandR extension missing";
-            return false;
-        }
+        if (!XTestQueryExtension(m_display, &xtestEvent, &xtestError, &xtestMajor, &xtestMinor))
+            return fail(tr("The X server has no XTest extension"));
+        if (!XRRQueryExtension(m_display, &m_randrEvent, &error))
+            return fail(tr("The X server has no XRandR extension"));
+        int fixesEvent = 0, fixesError = 0;
+        m_hasXFixes = XFixesQueryExtension(m_display, &fixesEvent, &fixesError);
 
         // Raw events from every master device, delivered to the root window.
         unsigned char bits[XIMaskLen(XI_LASTEVENT)] = {};
@@ -113,31 +124,59 @@ public:
         auto *notifier = new QSocketNotifier(ConnectionNumber(m_display), QSocketNotifier::Read, this);
         connect(notifier, &QSocketNotifier::activated, this, [this] { processEvents(); });
         processEvents();
+        m_rawSelected = true;
         return true;
     }
 
-    bool isCapturing() const override { return m_capturing; }
+    QString problem() const override { return m_problem; }
+    bool isCapturing() const override { return m_capturing || m_grabPending; }
+    // XInput2 raw events show local presses (XTest's own devices are told apart, see injected),
+    // once start() selected them (it can fail with the display open, e.g. without XInput 2.2).
+    bool reportsLocalPresses() const override { return m_rawSelected; }
     void setReportEdges(bool report) override { m_reportEdges = report; }
+    void setEdgeMap(const QList<EdgeSpan> &spans) override { m_edgeMap = spans; }
+    bool leftButtonHeld() const override { return m_localButtons.count(1) > 0; }
+    void setReportReleases(bool on) override { m_reportReleases = on; }
 
-    void setCapture(bool on, QPoint returnTo) override
+    void setCursorHidden(bool hidden) override
+    {
+        if (!m_display || !m_hasXFixes || hidden == m_cursorHidden)
+            return;
+        // XFixes counts hides per client: exactly one hide is outstanding while hidden.
+        if (hidden)
+            XFixesHideCursor(m_display, m_root);
+        else
+            XFixesShowCursor(m_display, m_root);
+        m_cursorHidden = hidden;
+        flush();
+    }
+
+    void setCapture(bool on, QPoint returnTo, int guardSide) override
     {
         if (!m_display)
             return;
         if (on) {
-            m_park = parkingPoint();
-            if (XGrabPointer(m_display, m_root, False, PointerMotionMask | ButtonPressMask | ButtonReleaseMask,
-                             GrabModeAsync, GrabModeAsync, X11None, m_blankCursor, CurrentTime)
-                != GrabSuccess)
-                qCWarning(lcX11Input) << "Pointer grab failed (another application holds it)";
-            if (XGrabKeyboard(m_display, m_root, False, GrabModeAsync, GrabModeAsync, CurrentTime) != GrabSuccess)
-                qCWarning(lcX11Input) << "Keyboard grab failed (another application holds it)";
-            XWarpPointer(m_display, X11None, m_root, 0, 0, 0, 0, m_park.x(), m_park.y());
-            m_capturing = true;
-        } else {
-            m_capturing = false;
+            if (m_capturing || m_grabPending)
+                return; // already capturing (an early capture the service confirms)
+            m_grabPending = true;
+            m_grabAttempts = 0;
+            m_haveKeyboard = m_havePointer = false;
+            tryGrab();
+            return;
+        }
+        const bool wasGrabbing = m_capturing || m_grabPending;
+        m_capturing = false;
+        m_grabPending = false;
+        m_grabRetry.stop();
+        if (wasGrabbing) {
             XUngrabKeyboard(m_display, CurrentTime);
             XUngrabPointer(m_display, CurrentTime);
-            XWarpPointer(m_display, X11None, m_root, 0, 0, 0, 0, returnTo.x(), returnTo.y());
+        }
+        m_haveKeyboard = m_havePointer = false;
+        XWarpPointer(m_display, X11None, m_root, 0, 0, 0, 0, returnTo.x(), returnTo.y());
+        if (guardSide >= 0) {
+            m_guardSide = guardSide;
+            m_guardSince = df::nowMs();
         }
         flush();
     }
@@ -214,6 +253,14 @@ public:
 private:
     static constexpr unsigned long X11None = 0L; // Xlib's "None"
 
+    bool fail(const QString &problem)
+    {
+        qCWarning(lcX11Input).noquote() << problem;
+        m_problem = problem;
+        emit problemChanged();
+        return false;
+    }
+
     static unsigned int toX11Button(int button)
     {
         switch (button) {
@@ -244,6 +291,58 @@ private:
         XFlush(m_display);
         if (XPending(m_display) > 0)
             QMetaObject::invokeMethod(this, [this] { processEvents(); }, Qt::QueuedConnection);
+    }
+
+    // One attempt at the capture grabs. Both are needed: with only the pointer the keys would go to
+    // the local focus and to the remote at once, with only the keyboard the local cursor would move.
+    void tryGrab()
+    {
+        if (!m_grabPending)
+            return;
+        ++m_grabAttempts;
+        if (!m_havePointer)
+            m_havePointer = XGrabPointer(m_display, m_root, False,
+                                         PointerMotionMask | ButtonPressMask | ButtonReleaseMask, GrabModeAsync,
+                                         GrabModeAsync, X11None, m_blankCursor, CurrentTime)
+                            == GrabSuccess;
+        if (!m_haveKeyboard)
+            m_haveKeyboard =
+                XGrabKeyboard(m_display, m_root, False, GrabModeAsync, GrabModeAsync, CurrentTime) == GrabSuccess;
+        if (m_havePointer && m_haveKeyboard) {
+            m_grabPending = false;
+            m_capturing = true;
+            m_park = parkingPoint();
+            XWarpPointer(m_display, X11None, m_root, 0, 0, 0, 0, m_park.x(), m_park.y());
+            flush();
+            return;
+        }
+        if (m_grabAttempts < kGrabAttempts) {
+            m_grabRetry.start();
+            XFlush(m_display);
+            return;
+        }
+        // Another application keeps a grab: no half capture. Undo what we got and give the
+        // input back (the service brings the cursor home on captureLost).
+        qCWarning(lcX11Input) << (m_havePointer ? "Keyboard" : "Pointer")
+                              << "grab failed: another application holds it; capture abandoned";
+        if (m_havePointer)
+            XUngrabPointer(m_display, CurrentTime);
+        if (m_haveKeyboard)
+            XUngrabKeyboard(m_display, CurrentTime);
+        m_havePointer = m_haveKeyboard = false;
+        m_grabPending = false;
+        flush();
+        emit captureLost(cursorPosition());
+    }
+
+    QPoint cursorPosition() const
+    {
+        Window rootReturn, child;
+        int rx = 0, ry = 0, wx = 0, wy = 0;
+        unsigned int buttons = 0;
+        if (!XQueryPointer(m_display, m_root, &rootReturn, &child, &rx, &ry, &wx, &wy, &buttons))
+            return parkingPoint();
+        return QPoint(rx, ry);
     }
 
     void findXTestDevices()
@@ -305,6 +404,21 @@ private:
         return -1;
     }
 
+    // Within a span of the edge map the push is known to cross: see InputBackend::setEdgeMap.
+    bool earlyCaptureAllowed(int side, int x, int y, qint64 now) const
+    {
+        if (m_edgeMap.isEmpty() || !m_localButtons.empty())
+            return false; // a held button may be a drag: the service decides (catch first)
+        if (m_guardSide == side && now - m_guardSince < kReturnGuardMs)
+            return false;
+        const int along = side < 2 ? y : x;
+        for (const EdgeSpan &s : m_edgeMap) {
+            if (s.side == side && s.screen.contains(x, y) && along >= s.from && along <= s.to)
+                return true;
+        }
+        return false;
+    }
+
     void processEvents()
     {
         while (m_display && XPending(m_display) > 0) {
@@ -323,42 +437,65 @@ private:
         }
     }
 
+    bool injected(const XIRawEvent *raw) const
+    {
+        return !m_options.xtestIsLocal && m_xtestDevices.count(raw->sourceid);
+    }
+
     // Not capturing: remember what is held locally and report pushes against outer edges.
     void handleRaw(const XIRawEvent *raw, int type)
     {
-        if (m_capturing || m_xtestDevices.count(raw->sourceid))
+        if (m_capturing || injected(raw))
             return; // grabbed events are handled separately; injected ones are ours
         switch (type) {
-        case XI_RawKeyPress:
-            m_localKeys.insert(df::keymap::set1FromEvdev(raw->detail - 8));
+        case XI_RawKeyPress: {
+            const quint32 set1 = df::keymap::set1FromEvdev(raw->detail - 8);
+            // Autorepeat (the key already held, XkbSetDetectableAutoRepeat) is no new press.
+            const bool gesture = !m_localKeys.count(set1) && df::keymap::isPasteEvidenceKey(m_localKeys, set1, false);
+            m_localKeys.insert(set1);
+            if (gesture)
+                emit localPasteGesture(); // paste evidence for file data
             break;
+        }
         case XI_RawKeyRelease:
             m_localKeys.erase(df::keymap::set1FromEvdev(raw->detail - 8));
             break;
         case XI_RawButtonPress:
-            if (const int b = fromX11Button(unsigned(raw->detail)))
+            setCursorHidden(false); // this computer's own mouse: the cursor belongs here again
+            if (const int b = fromX11Button(unsigned(raw->detail))) {
                 m_localButtons.insert(b);
+                emit localPasteGesture(); // a button, not the wheel (X11 buttons 4 to 7)
+            }
             break;
-        case XI_RawButtonRelease:
-            if (const int b = fromX11Button(unsigned(raw->detail)))
+        case XI_RawButtonRelease: {
+            const int b = fromX11Button(unsigned(raw->detail));
+            if (b)
                 m_localButtons.erase(b);
+            if (b == 1 && m_reportReleases && !m_grabPending)
+                emit localRelease(cursorPosition()); // a file drag may end here (dragWatch)
             break;
+        }
         case XI_RawMotion: {
-            if (!m_reportEdges)
+            setCursorHidden(false);
+            if (!m_reportEdges || m_grabPending)
                 break;
-            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            const qint64 now = df::nowMs();
+            const QPoint at = cursorPosition();
+            const int side = outerEdge(at.x(), at.y());
+            if (side < 0)
+                break;
+            if (earlyCaptureAllowed(side, at.x(), at.y(), now)) {
+                // Known to cross: capture now so that the motion while the service answers is not
+                // lost. The edge goes first; the service confirms or declines (setCapture).
+                m_lastEdge = now;
+                emit edgeHit(side, at, true);
+                setCapture(true, at, -1);
+                break;
+            }
             if (now - m_lastEdge < kEdgeThrottleMs)
                 break;
-            Window rootReturn, child;
-            int rx = 0, ry = 0, wx = 0, wy = 0;
-            unsigned int buttons = 0;
-            if (!XQueryPointer(m_display, m_root, &rootReturn, &child, &rx, &ry, &wx, &wy, &buttons))
-                break;
-            const int side = outerEdge(rx, ry);
-            if (side >= 0) {
-                m_lastEdge = now;
-                emit edgeHit(side, QPoint(rx, ry));
-            }
+            m_lastEdge = now;
+            emit edgeHit(side, at, false);
             break;
         }
         default:
@@ -415,18 +552,32 @@ private:
         }
     }
 
+    const X11BackendOptions m_options;
     Display *m_display = nullptr;
     Window m_root = 0;
     int m_xiOpcode = 0;
     int m_randrEvent = 0;
+    bool m_hasXFixes = false;
+    bool m_rawSelected = false; // start() got as far as selecting the raw events
     Cursor m_blankCursor = 0;
     std::set<int> m_xtestDevices;
     std::vector<Rect> m_monitors;
     int m_primary = 0;
+    QString m_problem;
     bool m_capturing = false;
+    bool m_grabPending = false; // capture asked for, grabs not complete yet (retrying)
+    bool m_havePointer = false;
+    bool m_haveKeyboard = false;
+    int m_grabAttempts = 0;
+    QTimer m_grabRetry;
     bool m_reportEdges = false;
+    bool m_reportReleases = false;
+    bool m_cursorHidden = false;
+    QList<EdgeSpan> m_edgeMap;
+    int m_guardSide = -1;
+    qint64 m_guardSince = 0;
     QPoint m_park;
-    qint64 m_lastEdge = 0;
+    qint64 m_lastEdge = -kEdgeThrottleMs;
     int m_wheelX = 0;
     int m_wheelY = 0;
     std::set<quint32> m_localKeys;
@@ -437,4 +588,7 @@ private:
 
 } // namespace
 
-InputBackend *createX11InputBackend(QObject *parent) { return new X11InputBackend(parent); }
+InputBackend *createX11InputBackend(QObject *parent, X11BackendOptions options)
+{
+    return new X11InputBackend(parent, options);
+}

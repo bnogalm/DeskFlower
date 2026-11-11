@@ -1,0 +1,82 @@
+# Generated from cmake/macdeploy.cmake.in (see cmake/MacBundle.cmake): deploys DeskFlower.app once
+# the agent, the service and the session helper are installed in it.
+
+set(_app "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/DeskFlower.app")
+set(_service "${_app}/Contents/MacOS/deskflower-service")
+set(_helperApp "${_app}/Contents/Helpers/deskflower-session.app")
+set(_helper "${_helperApp}/Contents/MacOS/deskflower-session")
+set(_frameworks "${_app}/Contents/Frameworks")
+foreach(_path IN ITEMS "${_app}" "${_service}" "${_helper}")
+    if(NOT EXISTS "${_path}")
+        message(FATAL_ERROR "Missing in the bundle: ${_path}")
+    endif()
+endforeach()
+
+function(df_run)
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE _rc OUTPUT_VARIABLE _out ERROR_VARIABLE _err)
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "Failed (${_rc}): ${ARGN}\n${_out}${_err}")
+    endif()
+endfunction()
+
+# Qt (and the other libraries the programs link, libsodium and libcrypto) for all three programs.
+message(STATUS "Deploying Qt into ${_app}")
+df_run("@DESKFLOWER_MACDEPLOYQT@" "${_app}" "-qmldir=@PROJECT_SOURCE_DIR@/src/agent/qml"
+       "-executable=${_service}" "-executable=${_helper}" -always-overwrite)
+
+# The helper's own bundle: its libraries are those of DeskFlower.app (Contents/Helpers/
+# deskflower-session.app/Contents/MacOS is four levels below Contents), and so are the Qt plugins
+# (qt.conf paths are relative to the helper's Contents).
+set(_up "@executable_path/../../../../Frameworks")
+execute_process(COMMAND otool -L "${_helper}" OUTPUT_VARIABLE _deps)
+string(REGEX MATCHALL "@executable_path/\\.\\./Frameworks/[^\n\t (]+" _refs "${_deps}")
+foreach(_ref IN LISTS _refs)
+    string(REPLACE "@executable_path/../Frameworks/" "${_up}/" _to "${_ref}")
+    df_run(install_name_tool -change "${_ref}" "${_to}" "${_helper}")
+endforeach()
+# Qt's frameworks are found through the run path (@rpath): add the right one (an existing entry is
+# not an error worth stopping for).
+execute_process(COMMAND install_name_tool -add_rpath "${_up}" "${_helper}" ERROR_QUIET)
+execute_process(COMMAND install_name_tool -add_rpath "@executable_path/../Frameworks" "${_service}" ERROR_QUIET)
+file(MAKE_DIRECTORY "${_helperApp}/Contents/Resources")
+file(WRITE "${_helperApp}/Contents/Resources/qt.conf" "[Paths]\nPlugins = ../../../PlugIns\n")
+
+# libssl for Qt's OpenSSL backend (the phone server), which loads it by name: found through
+# DYLD_FALLBACK_LIBRARY_PATH, which the service's LaunchAgent points at Contents/Frameworks
+# (platform::install). It uses the libcrypto deployed next to it.
+set(_ssl "@DESKFLOWER_LIBSSL@")
+set(_crypto "@DESKFLOWER_LIBCRYPTO@")
+get_filename_component(_sslName "${_ssl}" NAME)
+get_filename_component(_cryptoName "${_crypto}" NAME)
+if(NOT EXISTS "${_frameworks}/${_cryptoName}")
+    file(COPY "${_crypto}" DESTINATION "${_frameworks}"
+         FILE_PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+    df_run(install_name_tool -id "@rpath/${_cryptoName}" "${_frameworks}/${_cryptoName}")
+endif()
+file(COPY "${_ssl}" DESTINATION "${_frameworks}" FILE_PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+df_run(install_name_tool -id "@rpath/${_sslName}" "${_frameworks}/${_sslName}")
+execute_process(COMMAND otool -L "${_frameworks}/${_sslName}" OUTPUT_VARIABLE _deps)
+string(REGEX MATCHALL "[^\n\t ]*libcrypto[^\n\t ]*\\.dylib" _refs "${_deps}")
+foreach(_ref IN LISTS _refs)
+    if(NOT _ref MATCHES "^@loader_path")
+        df_run(install_name_tool -change "${_ref}" "@loader_path/${_cryptoName}" "${_frameworks}/${_sslName}")
+    endif()
+endforeach()
+
+# Nothing may still point outside the bundle (Homebrew, the Qt used to build).
+file(GLOB_RECURSE _binaries LIST_DIRECTORIES false "${_frameworks}/*.dylib" "${_app}/Contents/PlugIns/*.dylib")
+list(APPEND _binaries "${_app}/Contents/MacOS/DeskFlower" "${_service}" "${_helper}")
+foreach(_binary IN LISTS _binaries)
+    execute_process(COMMAND otool -L "${_binary}" OUTPUT_VARIABLE _deps)
+    if(_deps MATCHES "\t(/opt/homebrew|/usr/local/(opt|Cellar)|@QT6_INSTALL_PREFIX@)[^\n]*")
+        message(FATAL_ERROR "${_binary} still uses ${CMAKE_MATCH_0}")
+    endif()
+endforeach()
+
+# Signed ad hoc, inside out (install_name_tool invalidated the signatures; Apple silicon runs no
+# unsigned code). Not notarized: Gatekeeper asks once (README).
+df_run(codesign --force --sign - "${_service}")
+df_run(codesign --force --deep --sign - "${_helperApp}")
+df_run(codesign --force --deep --sign - "${_app}")
+df_run(codesign --verify --deep --strict "${_app}")
+message(STATUS "DeskFlower.app deployed and signed")

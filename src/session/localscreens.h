@@ -4,7 +4,10 @@
 #include <QCborArray>
 #include <QList>
 #include <QRect>
+#include <QImage>
 #include <QString>
+
+#include <functional>
 
 class QScreen;
 
@@ -22,5 +25,10 @@ QString screenId(QScreen *screen);
 
 // Small JPEG capture of a screen's content, at most maxWidth x maxHeight.
 QByteArray captureThumbnail(QScreen *screen, int maxWidth = 480, int maxHeight = 300);
+
+// Where screen images come from instead of QScreen::grabWindow (Wayland: the portal's screen
+// cast, which a background program needs): the image of the screen with that native geometry,
+// null if there is none (yet).
+void setCaptureSource(std::function<QImage(const QRect &nativeGeometry)> source);
 
 } // namespace LocalScreens

@@ -50,6 +50,10 @@ public:
         // it lives (a service running as LocalSystem acts as the signed-in user). A null guard
         // refuses the request.
         std::function<std::shared_ptr<void>()> asUser;
+        // Optional: who is signed in at the console now, as a stable id (the user's SID). A session
+        // is bound to the user who granted it; once a different user is at the console, the session
+        // is refused, so a QR scanned by one user does not follow a fast switch to another's files.
+        std::function<QString()> userId;
     };
 
     explicit PhoneServer(Options options, QObject *parent = nullptr);
@@ -84,6 +88,7 @@ private:
     struct Session {
         QDateTime expires;
         QString client;
+        QString user; // SID of the console user who granted it (empty: binding not in use)
     };
 
     HttpResponse handle(const HttpRequest &request);

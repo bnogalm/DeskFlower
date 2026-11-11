@@ -6,8 +6,10 @@
 #include <QFile>
 #include <QRandomGenerator>
 #include <QSignalSpy>
+#include <QPointer>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 
 using namespace df;
 
@@ -299,6 +301,209 @@ private slots:
         QCOMPARE(again.error, QString("error 1603"));
         QCOMPARE(client.state(), Updater::State::Idle);
         QVERIFY(!QFile::exists(installerB.launched.first()));
+    }
+
+    // Signed updates do not depend on the transfer protocol (wire::kProtocolVersion): a device
+    // that advertises none (0.1.30 and before) still offers and serves its package, and is told
+    // a newer package would update it (servesUpdateFor), so that an old device can be updated
+    // from a new one and the other way round.
+    void updatesWorkAcrossTransferProtocols()
+    {
+        const update::SigningKey key = update::generateSigningKey();
+        QTemporaryDir dirA, dirB, release, storeA, storeB;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        // A: an older device (no protocol in its hello). B: says the test platform, as a real
+        // device says its own.
+        a->setHelloOverrideForTests([](QCborMap &hello) {
+            hello.insert(QStringLiteral("v"), QStringLiteral("0.1.30"));
+            hello.remove(QStringLiteral("pv"));
+        });
+        b->setHelloOverrideForTests([](QCborMap &hello) {
+            hello.insert(QStringLiteral("v"), QStringLiteral("0.1.0"));
+            hello.insert(QStringLiteral("pl"), kPlatform);
+        });
+        QVERIFY(test::pairNodes(*a, *b));
+        QTRY_COMPARE(b->peerProtocol(a->id()), 2);
+        QVERIFY(!b->transfersCompatible(a->id()));
+
+        const QString package = makeRelease(release.path(), key, "0.2.0", kPlatform, 300 * 1024 + 5);
+        QString error;
+        QVERIFY2(Updater::importPackage(options(storeA.path(), key, "0.2.0"), package, &error), qPrintable(error));
+        MockInstaller installerA, installerB;
+        Updater server(a.get(), &installerA, options(storeA.path(), key, "0.2.0"));
+        Updater client(b.get(), &installerB, options(storeB.path(), key, "0.1.0"));
+        auto viewOn = [](const Node &node, const QByteArray &id) {
+            const auto v = test::viewOf(node, id);
+            return v ? *v : PeerView{};
+        };
+        QTRY_COMPARE(client.offeredUpdate(viewOn(*b, a->id())), QString("0.2.0"));
+        QTRY_VERIFY(server.servesUpdateFor(viewOn(*a, b->id())));
+        QVERIFY(!client.servesUpdateFor(viewOn(*b, a->id()))); // B serves nothing
+
+        Result result;
+        track(&client, &result);
+        QVERIFY2(client.update(a->id(), &error), qPrintable(error));
+        QTRY_VERIFY_WITH_TIMEOUT(result.done, 30000);
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QCOMPARE(installerB.content, readFile(package));
+    }
+
+    void guestsAreNotOfferedUpdates()
+    {
+        const update::SigningKey key = update::generateSigningKey();
+        QTemporaryDir dirA, dirB, release, storeA, storeB;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        QVERIFY(test::pairNodes(*a, *b));
+        const QString package = makeRelease(release.path(), key, "0.2.0");
+        QString error;
+        QVERIFY(Updater::importPackage(options(storeA.path(), key, "0.2.0"), package, &error));
+        MockInstaller installerA, installerB;
+        Updater server(a.get(), &installerA, options(storeA.path(), key, "0.2.0"));
+        Updater client(b.get(), &installerB, options(storeB.path(), key, "0.1.0"));
+
+        auto peerOf = [&] {
+            for (const PeerView &p : b->peers()) {
+                if (p.id == a->id())
+                    return p;
+            }
+            return PeerView{};
+        };
+        QTRY_VERIFY(!client.offeredUpdate(peerOf()).isEmpty()); // offered while fully trusted
+        b->setTrust(a->id(), TrustLevel::Guest);
+        QCOMPARE(peerOf().trust, TrustLevel::Guest);
+        QVERIFY(client.offeredUpdate(peerOf()).isEmpty()); // a guest is not offered as a source
+    }
+
+    void cancellingStopsADownload()
+    {
+        const update::SigningKey key = update::generateSigningKey();
+        QTemporaryDir dirA, dirB, storeB;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        QVERIFY(test::pairNodes(*a, *b));
+        MockInstaller installerB;
+        Updater client(b.get(), &installerB, options(storeB.path(), key, "0.1.0")); // a serves nothing
+        Result result;
+        track(&client, &result);
+        QString error;
+        QVERIFY2(client.update(a->id(), &error), qPrintable(error));
+        QCOMPARE(client.state(), Updater::State::Downloading);
+        client.cancel();
+        QVERIFY(result.done);
+        QVERIFY(!result.ok);
+        QVERIFY2(result.error.contains("Cancelled"), qPrintable(result.error));
+        QCOMPARE(client.state(), Updater::State::Idle);
+    }
+
+    // The minimum-progress window starts with the package's first byte: a source slow to start
+    // sending (opening and checking its package, a busy disk) is not taken for a trickle, while
+    // one that trickles once it has started still is. `a` serves by hand here: the package after
+    // `delayMs`, then `chunk` bytes every `gapMs`.
+    void theProgressWindowStartsWithTheFirstByte()
+    {
+        const update::SigningKey key = update::generateSigningKey();
+        QTemporaryDir dirA, dirB, release, storeB;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        QVERIFY(test::pairNodes(*a, *b));
+        const QString package = makeRelease(release.path(), key, "0.2.0", kPlatform, 200 * 1024);
+        const QByteArray json = readFile(package + update::kManifestSuffix);
+        const QByteArray signature = update::decodeSignature(readFile(package + update::kSignatureSuffix));
+        const QByteArray bytes = readFile(package);
+        QVERIFY(!json.isEmpty() && !signature.isEmpty() && !bytes.isEmpty());
+
+        int delayMs = 0, chunk = 0, gapMs = 0;
+        connect(a.get(), &Node::streamAccepted, a.get(), [&](SecureStream *accepted) {
+            QPointer<SecureStream> stream(accepted);
+            connect(accepted, &SecureStream::received, accepted, [&, stream](const QByteArray &frame) {
+                if (frame.isEmpty() || quint8(frame[0]) != 1)
+                    return; // the update request is the only control frame
+                QTimer::singleShot(delayMs, a.get(), [&, stream] {
+                    if (!stream)
+                        return;
+                    QCborMap header;
+                    header.insert(QStringLiteral("t"), QStringLiteral("package"));
+                    header.insert(QStringLiteral("m"), json);
+                    header.insert(QStringLiteral("s"), signature);
+                    stream->send(char(1) + QCborValue(header).toCbor());
+                    auto *timer = new QTimer(stream);
+                    auto offset = std::make_shared<qsizetype>(0);
+                    connect(timer, &QTimer::timeout, stream, [&, stream, timer, offset] {
+                        if (!stream)
+                            return;
+                        do {
+                            if (*offset >= bytes.size()) {
+                                timer->stop();
+                                QCborMap end;
+                                end.insert(QStringLiteral("t"), QStringLiteral("end"));
+                                stream->send(char(1) + QCborValue(end).toCbor());
+                                return;
+                            }
+                            stream->send(char(2) + bytes.mid(*offset, chunk));
+                            *offset += chunk;
+                        } while (gapMs == 0);
+                    });
+                    timer->start(gapMs);
+                });
+            });
+        });
+
+        MockInstaller installerB;
+        Updater::Options clientOptions = options(storeB.path(), key, "0.1.0");
+        clientOptions.minProgressWindowMs = 300;
+        QString error;
+
+        // Late but then quick: installed.
+        {
+            delayMs = 800;
+            chunk = 32 * 1024;
+            gapMs = 0;
+            Updater client(b.get(), &installerB, clientOptions);
+            Result result;
+            track(&client, &result);
+            QVERIFY2(client.update(a->id(), &error), qPrintable(error));
+            QTRY_VERIFY_WITH_TIMEOUT(result.done, 15000);
+            QVERIFY2(result.ok, qPrintable(result.error));
+            QCOMPARE(installerB.content, bytes);
+            installerB.onExit(false, QStringLiteral("not this time")); // back to Idle
+        }
+
+        // Started at once, then a trickle (8 KB every 150 ms, well under 64 KB per 300 ms): given up.
+        {
+            delayMs = 0;
+            chunk = 8 * 1024;
+            gapMs = 150;
+            Updater client(b.get(), &installerB, clientOptions);
+            Result result;
+            track(&client, &result);
+            QVERIFY2(client.update(a->id(), &error), qPrintable(error));
+            QTRY_VERIFY_WITH_TIMEOUT(result.done, 15000);
+            QVERIFY(!result.ok);
+            QVERIFY2(result.error.contains("too slowly"), qPrintable(result.error));
+        }
+    }
+
+    void aStalledDownloadHitsTheDeadline()
+    {
+        const update::SigningKey key = update::generateSigningKey();
+        QTemporaryDir dirA, dirB, storeB;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        QVERIFY(test::pairNodes(*a, *b));
+        MockInstaller installerB;
+        Updater::Options clientOptions = options(storeB.path(), key, "0.1.0");
+        clientOptions.totalDeadlineMs = 300; // a never answers
+        Updater client(b.get(), &installerB, clientOptions);
+        Result result;
+        track(&client, &result);
+        QString error;
+        QVERIFY2(client.update(a->id(), &error), qPrintable(error));
+        QTRY_VERIFY_WITH_TIMEOUT(result.done, 5000);
+        QVERIFY(!result.ok);
+        QVERIFY2(result.error.contains("too long"), qPrintable(result.error));
+        QCOMPARE(client.state(), Updater::State::Idle);
     }
 
     void unpairedPeerRefused()

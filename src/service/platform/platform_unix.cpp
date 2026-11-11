@@ -1,6 +1,7 @@
 #include "platform.h"
 
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -55,7 +56,14 @@ QString plistPath()
 {
     return QDir::home().filePath(QStringLiteral("Library/LaunchAgents/com.deskflower.service.plist"));
 }
+QString agentPlistPath()
+{
+    return QDir::home().filePath(QStringLiteral("Library/LaunchAgents/com.deskflower.agent.plist"));
+}
 QString guiDomain() { return QStringLiteral("gui/%1").arg(::getuid()); }
+// The agent of the same bundle (DeskFlower.app/Contents/MacOS, next to the service).
+QString agentProgram() { return QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("DeskFlower")); }
+constexpr const char *kAgentBundleId = "com.deskflower.agent";
 #else
 QString unitPath()
 {
@@ -72,20 +80,19 @@ int install(QString *message)
 #ifdef Q_OS_MACOS
     const QString logDir = QDir::home().filePath(QStringLiteral("Library/Logs/Deskflower"));
     QDir().mkpath(logDir);
-    const QByteArray plist = QStringLiteral(R"(<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>com.deskflower.service</string>
-    <key>ProgramArguments</key><array><string>%1</string></array>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-    <key>ProcessType</key><string>Interactive</string>
-    <key>StandardErrorPath</key><string>%2/service.log</string>
-</dict>
-</plist>
-)").arg(exe.toHtmlEscaped(), logDir.toHtmlEscaped()).toUtf8();
-    if (!writeFile(plistPath(), plist, message))
+    LaunchAgent agent;
+    agent.label = QStringLiteral("com.deskflower.service");
+    agent.arguments = {exe};
+    agent.keepAlive = true; // quitting from the agent exits cleanly: stopped until it starts it
+    agent.associatedBundle = QString::fromLatin1(kAgentBundleId);
+    agent.logPath = QDir(logDir).filePath(QStringLiteral("service.log"));
+    // Qt's OpenSSL backend (the phone server) loads libssl by name at run time: the copy in the
+    // bundle (Contents/Frameworks), then the system's usual places.
+    const QString frameworks = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/../Frameworks"));
+    if (QFileInfo(frameworks).isDir())
+        agent.environment.append({QStringLiteral("DYLD_FALLBACK_LIBRARY_PATH"),
+                                  frameworks + QStringLiteral(":/usr/local/lib:/usr/lib")});
+    if (!writeFile(plistPath(), launchAgentPlist(agent), message))
         return 1;
     run(QStringLiteral("launchctl"), {QStringLiteral("bootout"), guiDomain(), plistPath()});
     QString out;
@@ -129,6 +136,7 @@ int uninstall(QString *message)
 #ifdef Q_OS_MACOS
     run(QStringLiteral("launchctl"), {QStringLiteral("bootout"), guiDomain(), plistPath()});
     QFile::remove(plistPath());
+    QFile::remove(agentPlistPath()); // not booted out: that would end the running agent
     *message = QStringLiteral("LaunchAgent removed.");
 #else
     run(QStringLiteral("systemctl"), {QStringLiteral("--user"), QStringLiteral("disable"), QStringLiteral("--now"),
@@ -165,9 +173,13 @@ void installQuitHandlers()
 
 QString defaultConfigDir(bool) { return QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation); }
 
+void createConfigDir(const QString &path, bool) { QDir().mkpath(path); } // the service runs as the user
+
 bool secureDirectory(const QString &path, bool) { return ::chmod(QFile::encodeName(path).constData(), 0700) == 0; }
 
 bool isClientAllowed(QLocalSocket *, bool) { return true; } // socket file is owner-only
+
+quint32 clientSessionId(QLocalSocket *, bool) { return kNoSession; } // one service per user here
 
 // The service runs inside the user session on these platforms: the helper is a plain child.
 quint32 activeConsoleSession() { return kNoSession; }
@@ -183,6 +195,8 @@ std::shared_ptr<void> actAsInteractiveUser(bool)
     return std::make_shared<int>(0); // the service runs as the user
 }
 
+QString impersonatedUserId() { return {}; } // nobody is impersonated
+
 void setUserTokenSourceForTests(UserTokenSource) {} // no tokens: the service runs as the user
 
 bool canInstallPackages(bool) { return false; }
@@ -196,11 +210,48 @@ bool launchPackageInstaller(const QString &, const QString &, std::function<void
 
 void relaunchAgent() {}
 
+#ifdef Q_OS_MACOS
+bool agentAutostartSupported(bool)
+{
+    // Only the service of an installed DeskFlower.app: one run from a build tree (tests, e2e,
+    // development) never touches the user's LaunchAgent.
+    return QCoreApplication::applicationDirPath().endsWith(QLatin1String(".app/Contents/MacOS"));
+}
+#else
 bool agentAutostartSupported(bool) { return false; }
+#endif
 
 bool clipboardInAgent(bool) { return false; }
 
+#ifdef Q_OS_MACOS
+void setAgentAutostart(bool on)
+{
+    // Read by launchd at the next sign-in; never loaded now (that would start a second agent, and
+    // unloading would end the running one).
+    if (!on) {
+        QFile::remove(agentPlistPath());
+        return;
+    }
+    const QString agent = agentProgram();
+    if (!QFileInfo(agent).isExecutable()) {
+        qWarning().noquote() << QStringLiteral("No agent next to the service (%1): it cannot start at sign-in").arg(agent);
+        return;
+    }
+    LaunchAgent entry;
+    entry.label = QStringLiteral("com.deskflower.agent");
+    entry.arguments = {agent, QStringLiteral("--minimized")};
+    entry.associatedBundle = QString::fromLatin1(kAgentBundleId);
+    QString message;
+    if (!writeFile(agentPlistPath(), launchAgentPlist(entry), &message))
+        qWarning().noquote() << message;
+}
+#else
 void setAgentAutostart(bool) {}
+#endif
+
+bool firewallScopeSupported(bool) { return false; }
+
+void setFirewallOtherSubnets(bool) {}
 
 bool launchInActiveSession(const QString &, const QStringList &, const QByteArray &, const QByteArray &,
                            SessionProcess *, QString *error)
@@ -209,6 +260,6 @@ bool launchInActiveSession(const QString &, const QStringList &, const QByteArra
     return false;
 }
 
-void terminateSessionProcess(SessionProcess *) {}
+void terminateSessionProcess(SessionProcess *, int) {}
 
 } // namespace df::platform

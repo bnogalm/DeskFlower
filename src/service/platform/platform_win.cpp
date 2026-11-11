@@ -19,6 +19,8 @@
 #include <wtsapi32.h>
 
 #include <atomic>
+#include <optional>
+#include <utility>
 #include <vector>
 
 Q_LOGGING_CATEGORY(lcPlatform, "deskflower.platform")
@@ -157,7 +159,8 @@ void removeFirewallRules()
 // A service has no desktop to show the firewall prompt on: add the rules explicitly (UDP for
 // discovery and sessions, TCP for file transfers and phone access). Windows marks many home Wi-Fi
 // networks as public, so they are covered too, but only for addresses on the local subnet (other
-// computers, phones on the same Wi-Fi); every connection still has to authenticate.
+// computers, phones on the same Wi-Fi) unless the user allows other subnets; every connection
+// still has to authenticate.
 void addFirewallRules()
 {
     removeFirewallRules();
@@ -168,7 +171,7 @@ void addFirewallRules()
     runNetsh({QStringLiteral("advfirewall"), QStringLiteral("firewall"), QStringLiteral("add"), QStringLiteral("rule"),
               QStringLiteral("name=%1").arg(kPublicFirewallRule), QStringLiteral("dir=in"),
               QStringLiteral("action=allow"), program, QStringLiteral("profile=public"),
-              QStringLiteral("remoteip=localsubnet"), QStringLiteral("enable=yes")});
+              QStringLiteral("remoteip=%1").arg(firewallPublicRemoteIps(false)), QStringLiteral("enable=yes")});
 }
 
 bool waitForState(SC_HANDLE service, DWORD state, int timeoutMs)
@@ -186,8 +189,79 @@ bool waitForState(SC_HANDLE service, DWORD state, int timeoutMs)
     return false;
 }
 
+// Terminates `pid` and the processes it started (the session helpers), and waits for them to end.
+void terminateProcessTree(DWORD pid)
+{
+    if (pid == 0 || pid == GetCurrentProcessId())
+        return;
+    std::vector<DWORD> children;
+    if (HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0); snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry = {};
+        entry.dwSize = sizeof(entry);
+        for (BOOL ok = Process32FirstW(snapshot, &entry); ok; ok = Process32NextW(snapshot, &entry)) {
+            if (entry.th32ParentProcessID == pid && entry.th32ProcessID != GetCurrentProcessId())
+                children.push_back(entry.th32ProcessID);
+        }
+        CloseHandle(snapshot);
+    }
+    children.insert(children.begin(), pid);
+    for (const DWORD id : children) {
+        if (HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, id)) {
+            TerminateProcess(process, 1);
+            WaitForSingleObject(process, 5000);
+            CloseHandle(process);
+        }
+    }
+}
+
+// The process of a running (or stopping) service, 0 when it has none.
+DWORD serviceProcessId(SC_HANDLE service)
+{
+    SERVICE_STATUS_PROCESS ssp = {};
+    DWORD needed = 0;
+    if (!QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp), &needed))
+        return 0;
+    return ssp.dwCurrentState == SERVICE_STOPPED ? 0 : ssp.dwProcessId;
+}
+
+// Stops the service for an uninstall or an upgrade, whatever its state: the failure actions go first
+// (a service that crashes while stopping would otherwise be restarted by the SCM a few seconds later,
+// and outlive the uninstall), then a stop request, and if it does not stop in time, its process.
+// `service` needs SERVICE_CHANGE_CONFIG, SERVICE_STOP and SERVICE_QUERY_STATUS.
+void stopServiceForGood(SC_HANDLE service, int timeoutMs)
+{
+    SC_ACTION none = {SC_ACTION_NONE, 0};
+    SERVICE_FAILURE_ACTIONSW failure = {};
+    failure.cActions = 0;
+    failure.lpsaActions = &none; // non-null with no actions: removes them
+    ChangeServiceConfig2W(service, SERVICE_CONFIG_FAILURE_ACTIONS, &failure);
+    SERVICE_STATUS status = {};
+    if (ControlService(service, SERVICE_CONTROL_STOP, &status) && waitForState(service, SERVICE_STOPPED, timeoutMs))
+        return;
+    if (const DWORD pid = serviceProcessId(service)) {
+        qCWarning(lcPlatform) << "The service did not stop: ending its process" << pid;
+        terminateProcessTree(pid);
+        waitForState(service, SERVICE_STOPPED, 5000);
+    }
+}
+
+// After DeleteService: the service is gone once its process ends and the last handle closes. A
+// restart the SCM had already scheduled may still start it meanwhile: end such a process too.
+void waitUntilServiceGone(SC_HANDLE scm, int timeoutMs)
+{
+    for (int waited = 0; waited <= timeoutMs; waited += 250) {
+        ScHandle service(OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS));
+        if (!service)
+            return;
+        if (const DWORD pid = serviceProcessId(service))
+            terminateProcessTree(pid);
+        QThread::msleep(250);
+    }
+}
+
 // Opens and updates the existing service, or creates it. A service marked for deletion (the previous
-// version's, while an upgrade removes it) disappears once its last handle is closed: wait for that.
+// version's, while an upgrade removes it) disappears once its last handle is closed and its process
+// ended: end that process if it still runs (an older uninstaller can leave it running), and wait.
 SC_HANDLE createOrUpdateService(SC_HANDLE scm, const std::wstring &command, QString *message)
 {
     for (int waited = 0; waited <= 30000; waited += 500) {
@@ -195,9 +269,7 @@ SC_HANDLE createOrUpdateService(SC_HANDLE scm, const std::wstring &command, QStr
             QThread::msleep(500);
         DWORD error = NO_ERROR;
         if (SC_HANDLE service = OpenServiceW(scm, kServiceName, SERVICE_ALL_ACCESS)) {
-            SERVICE_STATUS status = {};
-            if (ControlService(service, SERVICE_CONTROL_STOP, &status))
-                waitForState(service, SERVICE_STOPPED, 15000);
+            stopServiceForGood(service, 15000);
             if (ChangeServiceConfigW(service, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
                                      command.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr, kDisplayName))
                 return service;
@@ -278,23 +350,26 @@ int uninstall(QString *message)
         *message = QStringLiteral("Cannot open the Service Control Manager: %1").arg(lastErrorString());
         return 1;
     }
-    ScHandle service(OpenServiceW(scm, kServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS | DELETE));
-    if (!service) {
-        const DWORD error = GetLastError();
-        if (error == ERROR_SERVICE_DOES_NOT_EXIST) {
-            *message = QStringLiteral("The service is not installed.");
-            return 0; // nothing to do (uninstallers call this unconditionally)
+    {
+        ScHandle service(
+            OpenServiceW(scm, kServiceName, SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_CHANGE_CONFIG | DELETE));
+        if (!service) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_SERVICE_DOES_NOT_EXIST) {
+                *message = QStringLiteral("The service is not installed.");
+                return 0; // nothing to do (uninstallers call this unconditionally)
+            }
+            *message = QStringLiteral("Cannot open the service: %1").arg(lastErrorString(error));
+            return 1;
         }
-        *message = QStringLiteral("Cannot open the service: %1").arg(lastErrorString(error));
-        return 1;
+        stopServiceForGood(service, 15000);
+        if (!DeleteService(service) && GetLastError() != ERROR_SERVICE_MARKED_FOR_DELETE) {
+            *message = QStringLiteral("Cannot delete the service: %1").arg(lastErrorString());
+            return 1;
+        }
     }
-    SERVICE_STATUS status = {};
-    if (ControlService(service, SERVICE_CONTROL_STOP, &status))
-        waitForState(service, SERVICE_STOPPED, 15000);
-    if (!DeleteService(service)) {
-        *message = QStringLiteral("Cannot delete the service: %1").arg(lastErrorString());
-        return 1;
-    }
+    // Our handle is closed: the service disappears once no process of it runs.
+    waitUntilServiceGone(scm, 10000);
     removeFirewallRules();
     setAgentAutostart(false);
     *message = QStringLiteral("Service removed.");
@@ -332,6 +407,40 @@ QString defaultConfigDir(bool serviceMode)
     if (programData.isEmpty())
         programData = QStringLiteral("C:/ProgramData");
     return QDir(programData).filePath(QStringLiteral("Deskflower"));
+}
+
+void createConfigDir(const QString &path, bool serviceMode)
+{
+    if (!serviceMode) {
+        QDir().mkpath(path);
+        return;
+    }
+    // Build the protected DACL (SYSTEM and Administrators only) that the folder must have, and
+    // create every missing component with it in one step, so a pre-created folder cannot linger
+    // owned by whoever made it. The owner of a folder a LocalSystem service creates is SYSTEM.
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", SDDL_REVISION_1,
+                                                              &sd, nullptr)) {
+        QDir().mkpath(path); // secureDirectory() still has to pass, or the service refuses to start
+        return;
+    }
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = sd;
+    sa.bInheritHandle = FALSE;
+
+    const QString clean = QDir::cleanPath(path);
+    const QStringList parts = clean.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    QString grown;
+    for (const QString &part : parts) {
+        grown += (grown.isEmpty() && !clean.startsWith(QLatin1Char('/'))) ? part : QStringLiteral("/") + part;
+        if (part.endsWith(QLatin1Char(':')))
+            continue; // the drive letter ("C:") is not a directory to create
+        const std::wstring native = QDir::toNativeSeparators(grown).toStdWString();
+        // The intermediate %ProgramData% exists already; only the ones we make get our descriptor.
+        CreateDirectoryW(native.c_str(), &sa);
+    }
+    LocalFree(sd);
 }
 
 bool secureDirectory(const QString &path, bool serviceMode)
@@ -376,6 +485,36 @@ bool secureDirectory(const QString &path, bool serviceMode)
             qCWarning(lcPlatform) << "Cannot restrict" << path << lastErrorString(rc);
     }
     LocalFree(sd);
+    if (ok && serviceMode) {
+        // A subfolder a user slipped in before we secured the parent keeps its own owner (the
+        // protected DACL above is inherited, but ownership is not rewritten, and an owner can grant
+        // itself access again). The service writes logs and installs updates under these, so refuse
+        // to start if one exists and is a link or is owned by another account.
+        for (const char *sub : {"logs", "updates"}) {
+            const QString child = QDir(path).filePath(QString::fromLatin1(sub));
+            const std::wstring childNative = QDir::toNativeSeparators(child).toStdWString();
+            const DWORD attributes = GetFileAttributesW(childNative.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES)
+                continue; // not there yet: it will be created under the protected parent
+            if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                qCCritical(lcPlatform).noquote() << QDir::toNativeSeparators(child) << "is a link: delete it, then start DeskFlower again";
+                return false;
+            }
+            PSID owner = nullptr;
+            PSECURITY_DESCRIPTOR current = nullptr;
+            const DWORD rc = GetNamedSecurityInfoW(childNative.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+                                                   &owner, nullptr, nullptr, nullptr, &current);
+            const bool trusted = rc == ERROR_SUCCESS
+                                 && (IsWellKnownSid(owner, WinLocalSystemSid)
+                                     || IsWellKnownSid(owner, WinBuiltinAdministratorsSid));
+            LocalFree(current);
+            if (!trusted) {
+                qCCritical(lcPlatform).noquote() << QDir::toNativeSeparators(child)
+                                                 << "is owned by another account: delete it, then start DeskFlower again";
+                return false;
+            }
+        }
+    }
     return ok;
 }
 
@@ -395,6 +534,38 @@ bool isClientAllowed(QLocalSocket *socket, bool serviceMode)
         return false;
     }
     return true;
+}
+
+quint32 clientSessionId(QLocalSocket *socket, bool serviceMode)
+{
+    if (!serviceMode)
+        return kNoSession;
+    const auto pipe = reinterpret_cast<HANDLE>(socket->socketDescriptor());
+    // Preferred: the client's own token, which cannot be spoofed by PID reuse.
+    quint32 session = kNoSession;
+    if (ImpersonateNamedPipeClient(pipe)) {
+        HANDLE token = nullptr;
+        if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token)) {
+            DWORD id = 0;
+            DWORD size = 0;
+            if (GetTokenInformation(token, TokenSessionId, &id, sizeof(id), &size))
+                session = id;
+            CloseHandle(token);
+        }
+        RevertToSelf();
+    } else {
+        // Before anything was read from the pipe this is the usual outcome (ERROR_CANNOT_IMPERSONATE).
+        qCDebug(lcPlatform) << "Cannot impersonate the IPC client:" << lastErrorString()
+                            << "(its session comes from its process id)";
+    }
+    if (session != kNoSession)
+        return session;
+    // Fall back to the connect-time PID if impersonation was not possible.
+    ULONG pid = 0;
+    DWORD sessionId = 0;
+    if (GetNamedPipeClientProcessId(pipe, &pid) && ProcessIdToSessionId(pid, &sessionId))
+        return sessionId;
+    return kNoSession;
 }
 
 quint32 activeConsoleSession() { return WTSGetActiveConsoleSessionId(); }
@@ -469,13 +640,10 @@ QString interactiveUserHome(bool serviceMode)
 
 bool separatesUsers(bool serviceMode) { return serviceMode; }
 
-QString interactiveUserId(bool serviceMode)
+namespace {
+// The user SID of `token`, as text ("S-1-5-21-..."); empty if it cannot be read.
+QString tokenUserSid(HANDLE token)
 {
-    if (!serviceMode)
-        return {};
-    const HANDLE token = consoleUserToken();
-    if (!token)
-        return {};
     QString sid;
     DWORD size = 0;
     GetTokenInformation(token, TokenUser, nullptr, 0, &size);
@@ -487,6 +655,30 @@ QString interactiveUserId(bool serviceMode)
             LocalFree(text);
         }
     }
+    return sid;
+}
+} // namespace
+
+QString interactiveUserId(bool serviceMode)
+{
+    if (!serviceMode)
+        return {};
+    const HANDLE token = consoleUserToken();
+    if (!token)
+        return {};
+    const QString sid = tokenUserSid(token);
+    CloseHandle(token);
+    return sid;
+}
+
+QString impersonatedUserId()
+{
+    // The thread's impersonation token, opened with the service's own rights (as currentThreadToken);
+    // none when the thread impersonates nobody.
+    HANDLE token = nullptr;
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token))
+        return {};
+    const QString sid = tokenUserSid(token);
     CloseHandle(token);
     return sid;
 }
@@ -576,6 +768,54 @@ bool launchPackageInstaller(const QString &package, const QString &logPath,
 }
 
 bool agentAutostartSupported(bool serviceMode) { return serviceMode; }
+
+bool firewallScopeSupported(bool serviceMode) { return serviceMode; }
+
+QString firewallPublicRemoteIps(bool otherSubnets)
+{
+    return otherSubnets ? QStringLiteral("localsubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,169.254.0.0/16")
+                        : QStringLiteral("localsubnet");
+}
+
+// One netsh at a time: a change asked for while one runs waits for it, and only the last one
+// asked for is applied then, so that the rule always ends as the setting says.
+static QProcess *s_firewallNetsh = nullptr;
+static std::optional<bool> s_firewallNext;
+
+void setFirewallOtherSubnets(bool on)
+{
+    if (s_firewallNetsh) {
+        s_firewallNext = on;
+        return;
+    }
+    // netsh takes a while: not on the service's event loop.
+    auto *p = new QProcess;
+    s_firewallNetsh = p;
+    const QStringList args{QStringLiteral("advfirewall"), QStringLiteral("firewall"), QStringLiteral("set"),
+                           QStringLiteral("rule"), QStringLiteral("name=%1").arg(kPublicFirewallRule),
+                           QStringLiteral("new"), QStringLiteral("remoteip=%1").arg(firewallPublicRemoteIps(on))};
+    const auto done = [p] {
+        p->deleteLater();
+        s_firewallNetsh = nullptr;
+        if (const std::optional<bool> next = std::exchange(s_firewallNext, std::nullopt))
+            setFirewallOtherSubnets(*next);
+    };
+    QObject::connect(p, &QProcess::finished, p, [p, args, done](int code, QProcess::ExitStatus status) {
+        if (status != QProcess::NormalExit || code != 0)
+            qCWarning(lcPlatform).noquote() << "netsh" << args.join(QLatin1Char(' ')) << "failed:"
+                                            << QString::fromLocal8Bit(p->readAllStandardOutput()).trimmed();
+        else
+            qCInfo(lcPlatform).noquote() << "Firewall rule for public networks now admits" << args.last();
+        done();
+    });
+    QObject::connect(p, &QProcess::errorOccurred, p, [done](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            qCWarning(lcPlatform) << "Cannot run netsh to change the firewall rule";
+            done();
+        }
+    });
+    p->start(QStringLiteral("netsh"), args);
+}
 
 bool clipboardInAgent(bool serviceMode) { return serviceMode; }
 
@@ -719,11 +959,12 @@ bool launchInActiveSession(const QString &program, const QStringList &args, cons
     return true;
 }
 
-void terminateSessionProcess(SessionProcess *process)
+void terminateSessionProcess(SessionProcess *process, int graceMs)
 {
     if (!process->handle)
         return;
-    TerminateProcess(process->handle, 0);
+    if (graceMs <= 0 || WaitForSingleObject(process->handle, DWORD(graceMs)) != WAIT_OBJECT_0)
+        TerminateProcess(process->handle, 0);
     WaitForSingleObject(process->handle, 3000);
     CloseHandle(process->handle);
     process->handle = nullptr;

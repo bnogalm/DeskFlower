@@ -108,6 +108,73 @@ std::optional<Crossing> Router::cross(const QByteArray &device, QPoint p, Side s
     return Crossing{best->device, entry - (best->global.topLeft() - best->local.topLeft())};
 }
 
+QList<EdgeSpan> Router::neighbourSpans(const QByteArray &device) const
+{
+    QList<EdgeSpan> spans;
+    struct Candidate {
+        int from, to, gap; // along the edge (plane coordinates), |gap| across it
+        const Screen *screen;
+    };
+    using Range = QPair<int, int>;
+    for (const Screen &s : m_screens) {
+        if (s.device != device)
+            continue;
+        const QRect &a = s.global;
+        for (const Side side : {Side::Left, Side::Right, Side::Top, Side::Bottom}) {
+            const bool horizontal = side == Side::Left || side == Side::Right;
+            QList<Candidate> candidates;
+            for (const Screen &o : m_screens) {
+                if (o.device == device)
+                    continue;
+                const QRect &r = o.global;
+                // The same gap as cross() measures from a cursor on the edge pixel.
+                int gap = 0;
+                switch (side) {
+                case Side::Right: gap = r.left() - (a.right() + 1); break;
+                case Side::Left: gap = a.left() - (r.right() + 1); break;
+                case Side::Bottom: gap = r.top() - (a.bottom() + 1); break;
+                case Side::Top: gap = a.top() - (r.bottom() + 1); break;
+                }
+                if (gap > kMaxGap || gap < -kMaxGap)
+                    continue;
+                const int from = horizontal ? qMax(a.top(), r.top()) : qMax(a.left(), r.left());
+                const int to = horizontal ? qMin(a.bottom(), r.bottom()) : qMin(a.right(), r.right());
+                if (from > to)
+                    continue; // no overlap along the edge
+                candidates.append({from, to, std::abs(gap), &o});
+            }
+            const int shift = horizontal ? a.top() - s.local.top() : a.left() - s.local.left();
+            // Where two neighbours overlap along the edge, cross() takes the nearer one (the first
+            // found when equally near): the other's span is cut there, so that nothing is promised
+            // for a stretch where the crossing would go elsewhere.
+            for (qsizetype k = 0; k < candidates.size(); ++k) {
+                const Candidate &c = candidates[k];
+                QList<Range> pieces{{c.from, c.to}};
+                for (qsizetype j = 0; j < candidates.size(); ++j) {
+                    const Candidate &b = candidates[j];
+                    if (j == k || b.gap > c.gap || (b.gap == c.gap && j > k))
+                        continue;
+                    QList<Range> cut;
+                    for (const Range &p : pieces) {
+                        if (b.to < p.first || b.from > p.second) {
+                            cut.append(p);
+                            continue;
+                        }
+                        if (b.from > p.first)
+                            cut.append({p.first, b.from - 1});
+                        if (b.to < p.second)
+                            cut.append({b.to + 1, p.second});
+                    }
+                    pieces = cut;
+                }
+                for (const Range &p : pieces)
+                    spans.append(EdgeSpan{s.local, side, p.first - shift, p.second - shift, c.screen->device});
+            }
+        }
+    }
+    return spans;
+}
+
 namespace {
 // Whether the cursor can cross between the two screens (in the shared plane), as in cross.
 bool touches(const QRect &a, const QRect &b)

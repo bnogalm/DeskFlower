@@ -27,6 +27,8 @@ class SymmetricState
 {
 public:
     explicit SymmetricState(const QByteArray &protocolName);
+    SymmetricState(const SymmetricState &) = default;
+    SymmetricState &operator=(const SymmetricState &) = default;
     ~SymmetricState();
 
     void mixHash(const QByteArray &data);
@@ -51,6 +53,9 @@ public:
     // Returns an empty array if the remote static key is invalid.
     QByteArray writeMessage1(const QByteArray &payload);
     // Returns keys and fills payload on success; nullopt if the message does not authenticate.
+    // A message that does not authenticate leaves the state as it was, so the genuine response
+    // can still be read after a forged or corrupted one (anyone can send one: the initiator's
+    // index travels in clear).
     std::optional<TransportKeys> readMessage2(const QByteArray &message, QByteArray *payload);
 
 private:

@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(Deskflower VERSION 0.1.19 LANGUAGES C CXX)
+project(Deskflower VERSION 0.1.20 LANGUAGES C CXX)
+if(APPLE)
+    # The macOS integration (pasteboard, drag and drop, screen capture) is Objective-C++.
+    enable_language(OBJCXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,6 +42,15 @@ else()
     message(STATUS "Signed updates from paired devices: key ${DESKFLOWER_UPDATE_PUBKEY_HEX}")
 endif()
 
+# Keyboard diagnostics (README, "Keyboard and mouse"): a troubleshooting tool that records the keys
+# going between devices. Off by default: no UI, the agent's and peers' requests are ignored and its
+# code is not built. On: DESKFLOWER_KEY_DIAGNOSTICS is defined for every target.
+option(DESKFLOWER_KEY_DIAGNOSTICS "Build the keyboard diagnostics (troubleshooting, records keys)" OFF)
+if(DESKFLOWER_KEY_DIAGNOSTICS)
+    add_compile_definitions(DESKFLOWER_KEY_DIAGNOSTICS)
+    message(STATUS "Keyboard diagnostics: built")
+endif()
+
 include(cmake/Sodium.cmake)
 include(cmake/AppIcon.cmake)
 
@@ -57,10 +70,27 @@ endif()
 # imported, and the same check runs.
 set(DESKFLOWER_DEPLOY_OPTIONS)
 if(WIN32)
-    set(DESKFLOWER_DEPLOY_OPTIONS
-        --no-virtualkeyboard --no-lottie --no-lottievectorimagegeneratorInternal --no-lottievectorimagehelpers
-        --no-quick3dutils --no-pdf --skip-plugin-types qmltooling
-        --exclude-plugins qtvirtualkeyboardplugin,qlottievectorimage,qpdf)
+    # windeployqt only knows --no-<module> for the modules this Qt installation has (and rejects
+    # the others): a module that is not installed cannot be deployed either, so its option is left
+    # out. The module list comes from windeployqt --help.
+    set(_df_excluded_modules virtualkeyboard lottie lottievectorimagegeneratorInternal
+        lottievectorimagehelpers quick3dutils pdf)
+    get_target_property(_df_windeployqt Qt6::windeployqt IMPORTED_LOCATION)
+    if(NOT _df_windeployqt)
+        get_filename_component(_df_qtbin "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}" ABSOLUTE)
+        set(_df_windeployqt "${_df_qtbin}/windeployqt.exe")
+    endif()
+    execute_process(COMMAND "${_df_windeployqt}" --help OUTPUT_VARIABLE _df_deploy_help
+                    ERROR_VARIABLE _df_deploy_help RESULT_VARIABLE _df_deploy_rc)
+    foreach(_df_module IN LISTS _df_excluded_modules)
+        if(_df_deploy_help MATCHES "[ \n]${_df_module}[ \n]")
+            list(APPEND DESKFLOWER_DEPLOY_OPTIONS --no-${_df_module})
+        endif()
+    endforeach()
+    # The MSVC runtime DLLs are installed next to the programs (below), not vc_redist.x64.exe.
+    list(APPEND DESKFLOWER_DEPLOY_OPTIONS --no-compiler-runtime --skip-plugin-types qmltooling
+         --exclude-plugins qtvirtualkeyboardplugin,qlottievectorimage,qpdf)
+    message(STATUS "windeployqt options: ${DESKFLOWER_DEPLOY_OPTIONS}")
 endif()
 
 if(MSVC)
@@ -68,6 +98,22 @@ if(MSVC)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION ${CMAKE_INSTALL_BINDIR})
     set(CMAKE_INSTALL_UCRT_LIBRARIES TRUE)
     include(InstallRequiredSystemLibraries)
+    # CMake releases older than the compiler (e.g. CMake 3.30 with Visual Studio 18) do not find its
+    # redistributable folder and install nothing: take the CRT DLLs from the newest
+    # VC\Redist\MSVC\<version>\x64\Microsoft.VC*.CRT folder ourselves.
+    if(NOT CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS MATCHES "vcruntime140")
+        file(GLOB _df_crt_dirs "$ENV{VCINSTALLDIR}Redist/MSVC/*/x64/Microsoft.VC*.CRT")
+        list(SORT _df_crt_dirs COMPARE NATURAL ORDER DESCENDING)
+        if(_df_crt_dirs)
+            list(GET _df_crt_dirs 0 _df_crt_dir)
+        endif()
+        if(NOT _df_crt_dir)
+            message(FATAL_ERROR "MSVC runtime DLLs not found (VCINSTALLDIR=$ENV{VCINSTALLDIR})")
+        endif()
+        file(GLOB _df_crt_dlls "${_df_crt_dir}/*.dll")
+        message(STATUS "MSVC runtime from ${_df_crt_dir}")
+        install(PROGRAMS ${_df_crt_dlls} DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
 endif()
 
 add_subdirectory(third_party/qrcodegen)
@@ -83,6 +129,9 @@ add_subdirectory(src/tools)
 # License texts next to the programs (also shown in the agent's About window).
 install(FILES LICENSE.md COMMERCIAL-LICENSE.md THIRD-PARTY-NOTICES.md DESTINATION .)
 install(DIRECTORY licenses/ DESTINATION licenses)
+if(APPLE)
+    include(cmake/MacBundle.cmake) # deploys and signs DeskFlower.app (after its programs, before the check)
+endif()
 # Runs after the deployment of every program: no GPL-only Qt module may end up in the package.
 install(CODE [[
     file(GLOB_RECURSE _gpl_only

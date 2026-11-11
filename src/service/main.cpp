@@ -1,4 +1,5 @@
 #include "buildinfo.h"
+#include "crashreport.h"
 #include "logging.h"
 #include "node.h"
 #include "platform/platform.h"
@@ -48,6 +49,25 @@ private:
     QString m_logPath;
 };
 
+// --version, --help and command-line errors go to stdout/stderr, never to a message box: Qt
+// shows one when the process has no console window and no redirected handles (started detached by
+// a script or a scheduler), and that box would block it until someone clicks it. Only for this
+// parse: the programs the service starts (the agent's own --help) keep Qt's default.
+void processCommandLine(QCommandLineParser &parser, const QCoreApplication &app)
+{
+#ifdef Q_OS_WIN
+    static constexpr char kNoBoxes[] = "QT_COMMAND_LINE_PARSER_NO_GUI_MESSAGE_BOXES";
+    const bool set = !qEnvironmentVariableIsSet(kNoBoxes);
+    if (set)
+        qputenv(kNoBoxes, "1");
+    parser.process(app);
+    if (set)
+        qunsetenv(kNoBoxes);
+#else
+    parser.process(app);
+#endif
+}
+
 int runNode(int argc, char **argv, bool serviceMode)
 {
     QCoreApplication app(argc, argv);
@@ -73,9 +93,13 @@ int runNode(int argc, char **argv, bool serviceMode)
     QCommandLineOption uninstallOpt(QStringLiteral("uninstall"), QStringLiteral("Stop and unregister the service."));
     QCommandLineOption noSessionOpt(QStringLiteral("no-session"),
                                     QStringLiteral("Do not start the session helper (no screens, no input)."));
-    parser.addOptions(
-        {instanceOpt, configOpt, portOpt, noDiscoveryOpt, serviceOpt, installOpt, uninstallOpt, noSessionOpt});
-    parser.process(app);
+    QCommandLineOption homeOpt(QStringLiteral("home"),
+                               QStringLiteral("Console mode: use this folder instead of the user's home for shared "
+                                              "and received files (tests, several instances)."),
+                               QStringLiteral("dir"));
+    parser.addOptions({instanceOpt, configOpt, portOpt, noDiscoveryOpt, serviceOpt, installOpt, uninstallOpt,
+                       noSessionOpt, homeOpt});
+    processCommandLine(parser, app);
 
     const QString instance = parser.value(instanceOpt);
     QString configDir = parser.value(configOpt);
@@ -84,7 +108,9 @@ int runNode(int argc, char **argv, bool serviceMode)
         if (!instance.isEmpty())
             configDir = QDir(configDir).filePath(instance);
     }
-    QDir().mkpath(configDir);
+    // Created in one step with a protected security descriptor (service mode): no window in which
+    // another user could pre-create a subfolder and keep ownership of it.
+    df::platform::createConfigDir(configDir, serviceMode);
     // As LocalSystem, a directory that others can change is not used at all (it holds the identity,
     // and the updater deletes and installs from it).
     if (!df::platform::secureDirectory(configDir, serviceMode) && serviceMode) {
@@ -96,6 +122,12 @@ int runNode(int argc, char **argv, bool serviceMode)
     const bool logToFile = settings.value(QStringLiteral("logging"), false).toBool();
     const QString logDir = QDir(configDir).filePath(QStringLiteral("logs"));
     df::installFileLogging(logDir, QStringLiteral("service.log"), !serviceMode, logToFile);
+    // File drags fail in ways nobody can reconstruct afterwards: their milestones are always kept
+    // (small, no names or paths).
+    df::installDiagnosticLog(logDir, QStringLiteral("drag.log"),
+                             {QStringLiteral("deskflower.drag"), QStringLiteral("deskflower.transfer")});
+    // Whatever the logging setting: a crash leaves a line in problems.log and a minidump.
+    df::crash::install(logDir, QStringLiteral("service"));
     if (!logToFile) {
         QFile::remove(QDir(logDir).filePath(QStringLiteral("session.log")));
         QFile::remove(QDir(logDir).filePath(QStringLiteral("session.log.1")));
@@ -141,29 +173,64 @@ int runNode(int argc, char **argv, bool serviceMode)
                              input.returnHome();
                      });
     df::FileTransfer transfer(&node);
+    // The service runs as LocalSystem: it serves and receives files only with the console user's
+    // rights, never its own, on the paths console-session processes supply (L1/L2).
+    transfer.setImpersonator([serviceMode] { return df::platform::actAsInteractiveUser(serviceMode); });
+    // A transfer at work when the console user changes stops at its next batch of disk work.
+    transfer.setUserIdentity([] { return df::platform::impersonatedUserId(); });
     // Shared folder: chosen in the agent, or <user home>/Deskflower (looked up each time: users log
     // on and off). Phone uploads go there and phones see it.
     // A chosen folder must still be acceptable (inside the signed-in user's folder; see
     // isAllowedSharedFolder), and it is created with that user's rights.
-    auto sharedFolder = [&settings, serviceMode, configDir] {
+    // --home (console mode only: as a service the folders always follow the console user) keeps a
+    // test or second instance out of the real user's folders, whose received files it would prune.
+    const QString homeOverride = serviceMode ? QString() : parser.value(homeOpt);
+    auto inHome = [homeOverride](const QString &name) {
+        const QString folder = QDir(homeOverride).filePath(name);
+        QDir().mkpath(folder);
+        return folder;
+    };
+    auto sharedFolder = [&settings, serviceMode, configDir, homeOverride, inHome] {
+        if (!homeOverride.isEmpty())
+            return inHome(QStringLiteral("Deskflower"));
         return df::platform::sharedFolder(settings.value(QStringLiteral("sharedFolder")).toString(),
                                           QDir(configDir).filePath(QStringLiteral("Shared")), serviceMode);
     };
-    // The clipboard follows the shared cursor (ClipboardSync).
-    df::ClipboardSync::Presence presence{[&input](qint64 graceMs) { return input.cursorHere(graceMs); },
-                                         [&workspace] { return workspace.masterId(); }};
+    // Trusted devices share the clipboard on every copy; for guests (and older peers) it follows the
+    // shared cursor (ClipboardSync), taken or handed on only with evidence of a real crossing
+    // (cursorArrived / cursorLeftRecently), never when idle.
+    df::ClipboardSync::Presence presence{
+        [&workspace] { return workspace.masterId(); },
+        [&input] { return input.cursorArrived(); },
+        [&input](qint64 graceMs) { return input.cursorLeftRecently(graceMs); },
+        // A guest's paste grant: the master decides from the paste chord it forwards; a guest only
+        // asks the master once a press from the master reached it.
+        [&input](const QByteArray &device, qint64 windowMs) { return input.pasteOrderedOn(device, windowMs); },
+        [&input](qint64 windowMs) { return input.inputArrived(windowMs); },
+        // Paste evidence for file data: the last paste gesture at this device (forwarded keys and
+        // buttons, and the helper's localPress), and whether the helper reports local presses.
+        [&input] { return input.lastPasteGestureAt(); },
+        [&input] { return input.localPressSupported(); }};
+    presence.pasteGestureBetween = [&input](qint64 from, qint64 to) { return input.pasteGestureBetween(from, to); };
     // Files received from paired devices wait apart, where phones do not see them.
-    auto receivedFolder = [serviceMode, configDir] {
+    auto receivedFolder = [serviceMode, configDir, homeOverride, inHome] {
+        if (!homeOverride.isEmpty())
+            return inHome(QStringLiteral("Received"));
         return df::platform::receivedFolder(QDir(configDir).filePath(QStringLiteral("Received")), serviceMode);
     };
     df::ClipboardSync clipboard(&node, &transfer, &settings, presence, receivedFolder);
     QObject::connect(&input, &df::InputController::cursorMoved, &clipboard, &df::ClipboardSync::cursorMoved);
+    // A new master gets the key of the clipboard copied here (escrowed with the old one).
+    QObject::connect(&workspace, &df::Workspace::changed, &clipboard, &df::ClipboardSync::masterChanged);
     df::web::PhoneServer::Options phoneOptions;
     phoneOptions.configDir = configDir;
     phoneOptions.port = quint16(settings.value(QStringLiteral("phonePort"), df::web::PhoneServer::kDefaultPort).toInt());
     phoneOptions.folder = sharedFolder;
     phoneOptions.deviceName = node.name();
     phoneOptions.asUser = [serviceMode] { return df::platform::actAsInteractiveUser(serviceMode); };
+    // A phone session belongs to the user who granted it; it is refused once another user is at the
+    // console (and revoked on a user change by the ServiceController).
+    phoneOptions.userId = [serviceMode] { return df::platform::interactiveUserId(serviceMode); };
     df::web::PhoneServer phone(phoneOptions);
     df::RemoteView remoteView(&node, &workspace);
     PlatformInstaller installer(serviceMode,
@@ -188,7 +255,10 @@ int runNode(int argc, char **argv, bool serviceMode)
     }
     std::unique_ptr<df::SessionLauncher> launcher;
     if (!parser.isSet(noSessionOpt))
-        launcher = std::make_unique<df::SessionLauncher>(instance, logToFile ? logDir : QString(), serviceMode);
+        // The helper's problems.log and dumps go to a folder of their own under the service's
+        // logs (on Windows it runs as LocalSystem, which may write there; a user could not).
+        launcher = std::make_unique<df::SessionLauncher>(instance, logToFile ? logDir : QString(),
+                                                         QDir(logDir).filePath(QStringLiteral("session")), serviceMode);
     // With --no-session the helper can be started by hand (e.g. under a debugger) using a token
     // agreed through DESKFLOWER_SESSION_TOKEN.
     const QByteArray sessionToken = launcher ? launcher->token() : qgetenv("DESKFLOWER_SESSION_TOKEN");
@@ -199,11 +269,19 @@ int runNode(int argc, char **argv, bool serviceMode)
         qCritical().noquote() << error;
         return 1;
     }
+    if (launcher) // the helper of a session that left the console is told to go through its pipe
+        QObject::connect(launcher.get(), &df::SessionLauncher::helperStopping, &controller,
+                         &df::ServiceController::onConsoleSessionChanged);
+    if (launcher) // Linux: the agent knows the graphical session the helper must use
+        QObject::connect(&controller, &df::ServiceController::sessionEnvironment, launcher.get(),
+                         &df::SessionLauncher::setSessionEnvironment);
+    // The agent's start at sign-in follows the user's choice (Windows: also after an upgrade, which
+    // removes the old Run entry; macOS: the LaunchAgent points at this bundle wherever it was moved).
+    // Not from an instance of its own (--instance, --config-dir): the user's entry is the default one's.
+    const bool defaultInstance = instance.isEmpty() && !parser.isSet(configOpt);
+    if (df::platform::agentAutostartSupported(serviceMode) && (serviceMode || defaultInstance))
+        df::platform::setAgentAutostart(settings.value(QStringLiteral("agentAutostart"), true).toBool());
     if (serviceMode) {
-        // The Run entry follows the user's choice (also after an upgrade, which removes the old one).
-        const bool autostart = settings.value(QStringLiteral("agentAutostart"), true).toBool();
-        if (df::platform::agentAutostartSupported(serviceMode))
-            df::platform::setAgentAutostart(autostart);
         // First start of a new version: an installer (or an update from a paired device) closed the
         // agent to replace its files, so start it again for the signed-in user.
         const QString version = QCoreApplication::applicationVersion();
@@ -222,6 +300,7 @@ int runNode(int argc, char **argv, bool serviceMode)
     df::platform::notifyStarted();
     const int rc = app.exec();
     qInfo() << "DeskFlower service stopped";
+    df::crash::markCleanExit(rc);
     return rc;
 }
 
@@ -246,12 +325,12 @@ int importUpdate(int argc, char **argv)
     QCommandLineOption configOpt(QStringLiteral("config-dir"), QStringLiteral("Configuration directory."),
                                  QStringLiteral("dir"));
     parser.addOptions({importOpt, configOpt});
-    parser.process(app);
+    processCommandLine(parser, app);
 
     QString configDir = parser.value(configOpt);
     if (configDir.isEmpty())
         configDir = df::platform::defaultConfigDir(true);
-    QDir().mkpath(configDir);
+    df::platform::createConfigDir(configDir, true);
     if (!df::platform::secureDirectory(configDir, true)) {
         std::fprintf(stderr, "Update package not kept: cannot secure %s\n", qPrintable(configDir));
         return 1;

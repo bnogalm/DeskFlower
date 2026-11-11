@@ -4,7 +4,7 @@
     - the application files are harvested from dist\Deskflower by heat.exe (component group AppFiles);
     - the service registers itself (service, failure actions, firewall rules, start) through
       "deskflower-service.exe -install", run silently as a deferred custom action; uninstalling runs
-      "-uninstall" before the files are removed;
+      "-uninstall" before Windows Installer stops services and removes the files;
     - the agent has a Start menu shortcut; the service writes its autostart entry (minimized to the
       system tray at every logon, a choice the user can change in the agent) and starts it after an
       installation or upgrade;
@@ -103,7 +103,9 @@
 
     <InstallExecuteSequence>
       <Custom Action="RestoreService" Before="UninstallService">REMOVE~="ALL"</Custom>
-      <Custom Action="UninstallService" Before="RemoveFiles">REMOVE~="ALL"</Custom>
+      <!-- Before StopServices: our uninstall removes the failure actions before the stop request, so
+           a service that fails while stopping is not restarted by the SCM after it. -->
+      <Custom Action="UninstallService" Before="StopServices">REMOVE~="ALL"</Custom>
       <Custom Action="ImportUpdate" After="InstallFiles">NOT REMOVE~="ALL"</Custom>
       <Custom Action="InstallService" Before="InstallFinalize">NOT REMOVE~="ALL"</Custom>
     </InstallExecuteSequence>

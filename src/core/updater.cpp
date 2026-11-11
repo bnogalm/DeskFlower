@@ -213,6 +213,8 @@ Updater::Updater(Node *node, PackageInstaller *installer, Options options, QObje
     m_idle.setSingleShot(true);
     m_idle.setInterval(kIdleTimeoutMs);
     connect(&m_idle, &QTimer::timeout, this, [this] { fail(QStringLiteral("Transfer timed out")); });
+    m_deadline.setSingleShot(true);
+    connect(&m_deadline, &QTimer::timeout, this, [this] { fail(QStringLiteral("The update took too long")); });
     connect(m_node, &Node::streamAccepted, this, &Updater::onStreamAccepted);
     loadServedPackage();
 }
@@ -229,10 +231,21 @@ Updater::~Updater()
 
 QString Updater::offeredUpdate(const PeerView &peer) const
 {
-    if (!peer.trusted || !peer.connected || peer.updateVersion.isEmpty() || peer.updatePlatform != m_options.platform)
+    // A guest is not offered as an update source: it is a low-trust device and should not be able
+    // to put a package in front of the user to install system-wide.
+    if (!peer.trusted || peer.trust == TrustLevel::Guest || !peer.connected || peer.updateVersion.isEmpty()
+        || peer.updatePlatform != m_options.platform)
         return {};
     const auto cmp = update::compareVersions(peer.updateVersion, m_options.version);
     return cmp && *cmp > 0 ? peer.updateVersion : QString();
+}
+
+bool Updater::servesUpdateFor(const PeerView &peer) const
+{
+    if (!m_served || !peer.trusted || peer.platform.isEmpty() || m_served->platform != peer.platform)
+        return false;
+    const auto cmp = update::compareVersions(m_served->version, peer.version);
+    return cmp && *cmp > 0;
 }
 
 // --- Store -------------------------------------------------------------------------------------
@@ -460,8 +473,17 @@ bool Updater::update(const QByteArray &peerId, QString *error)
         fail(reason.isEmpty() ? QStringLiteral("Connection closed") : reason);
     });
     m_idle.start();
+    m_deadline.start(m_options.totalDeadlineMs);
+    m_windowStart = -1; // from the first byte (onFrame)
+    m_windowBytes = 0;
     setState(State::Downloading);
     return true;
+}
+
+void Updater::cancel()
+{
+    if (m_state == State::Downloading)
+        fail(QStringLiteral("Cancelled"));
 }
 
 void Updater::onFrame(const QByteArray &frame)
@@ -478,6 +500,18 @@ void Updater::onFrame(const QByteArray &frame)
         if (m_file.write(frame.constData() + 1, n) != n)
             return fail(QStringLiteral("Disk full or write error"));
         m_received += n;
+        // Minimum progress: a steady trickle keeps the idle timer happy but must still advance.
+        const qint64 now = nowMs();
+        if (m_windowStart < 0) {
+            m_windowStart = now;
+            m_windowBytes = m_received - n;
+        }
+        if (now - m_windowStart >= m_options.minProgressWindowMs) {
+            if (m_received - m_windowBytes < kMinProgressBytes)
+                return fail(QStringLiteral("The update is coming too slowly"));
+            m_windowStart = now;
+            m_windowBytes = m_received;
+        }
         emit stateChanged();
         return;
     }
@@ -525,6 +559,7 @@ void Updater::onPackage(const QCborMap &msg)
 void Updater::onComplete()
 {
     m_idle.stop();
+    m_deadline.stop();
     m_stream->disconnect(this);
     m_stream->close();
     m_stream->deleteLater();
@@ -584,6 +619,7 @@ void Updater::fail(const QString &error)
 void Updater::resetDownload()
 {
     m_idle.stop();
+    m_deadline.stop();
     if (m_stream) {
         m_stream->disconnect(this);
         m_stream->close();

@@ -22,6 +22,28 @@ private slots:
         QVERIFY(!crypto::aeadDecrypt(key, 7, "xx", ct));
     }
 
+    // Sealing a clipboard format under a one-off key: a random nonce per seal, bound to its id and
+    // mime, decrypted only with the same key and ad.
+    void sealRoundTrip()
+    {
+        const QByteArray key = crypto::sealKey();
+        QCOMPARE(key.size(), crypto::kKeySize);
+        const QByteArray ad = QByteArray("kid-16-bytes----") + QByteArray("text/plain");
+        const QByteArray plain = QByteArray("a copied password");
+        const QByteArray sealed = crypto::seal(key, ad, plain);
+        QVERIFY(sealed.size() == plain.size() + crypto::kSealOverhead);
+        QCOMPARE(crypto::unseal(key, ad, sealed).value_or(QByteArray()), plain);
+        // Each seal uses a fresh nonce, so the same plaintext seals differently.
+        QVERIFY(crypto::seal(key, ad, plain) != sealed);
+        // Wrong key, wrong ad (another id or mime) or tampered bytes do not decrypt.
+        QVERIFY(!crypto::unseal(crypto::sealKey(), ad, sealed));
+        QVERIFY(!crypto::unseal(key, ad + "x", sealed));
+        QByteArray tampered = sealed;
+        tampered[tampered.size() - 1] = char(tampered.back() ^ 1);
+        QVERIFY(!crypto::unseal(key, ad, tampered));
+        QVERIFY(!crypto::unseal(key, ad, QByteArray(8, '\0'))); // too short
+    }
+
     void noiseHandshake()
     {
         const auto alice = crypto::generateKeyPair();
@@ -70,6 +92,33 @@ private slots:
         m1[40] = char(m1[40] ^ 1);
         noise::IKResponder resp(bob, "test");
         QVERIFY(!resp.readMessage1(m1, nullptr));
+    }
+
+    void noiseInitiatorSurvivesAForgedResponse()
+    {
+        // Anyone can send a message 2 to a pending initiator (its index travels in clear): one
+        // that does not authenticate must leave the initiator able to read the genuine one.
+        const auto alice = crypto::generateKeyPair();
+        const auto bob = crypto::generateKeyPair();
+        noise::IKInitiator init(alice, bob.publicKey, "test");
+        const QByteArray m1 = init.writeMessage1("hi bob");
+        noise::IKResponder resp(bob, "test");
+        QVERIFY(resp.readMessage1(m1, nullptr));
+        QByteArray m2;
+        const auto bobKeys = resp.writeMessage2("hi alice", &m2);
+        QVERIFY(bobKeys);
+
+        QVERIFY(!init.readMessage2(crypto::randomBytes(m2.size()), nullptr)); // forged
+        QByteArray tampered = m2;
+        tampered[tampered.size() - 1] = char(tampered[tampered.size() - 1] ^ 1);
+        QVERIFY(!init.readMessage2(tampered, nullptr)); // corrupted
+        QByteArray payload;
+        const auto aliceKeys = init.readMessage2(m2, &payload);
+        QVERIFY(aliceKeys);
+        QCOMPARE(payload, QByteArray("hi alice"));
+        QCOMPARE(aliceKeys->sendKey, bobKeys->recvKey);
+        QCOMPARE(aliceKeys->recvKey, bobKeys->sendKey);
+        QCOMPARE(aliceKeys->handshakeHash, bobKeys->handshakeHash);
     }
 
     void cpaceSamePin()

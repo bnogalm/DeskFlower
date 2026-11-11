@@ -1,5 +1,6 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Dialogs
 import QtQuick.Layouts
@@ -13,9 +14,11 @@ Item {
     required property Backend backend
     property int urlIndex: 0
 
-    readonly property string phoneUrl: backend.phoneUrls.length > 0
-                                       ? backend.phoneUrls[Math.min(urlIndex, backend.phoneUrls.length - 1)] : ""
-    readonly property var imageSuffixes: ["jpg", "jpeg", "png", "gif", "webp", "bmp"]
+    // A typed copy of the phone addresses, indexed below.
+    readonly property list<string> phoneUrls: backend.phoneUrls
+    readonly property string phoneUrl: phoneUrls.length > 0
+                                       ? phoneUrls[Math.min(urlIndex, phoneUrls.length - 1)] : ""
+    readonly property list<string> imageSuffixes: ["jpg", "jpeg", "png", "gif", "webp", "bmp"]
 
     ColumnLayout {
         anchors.fill: parent
@@ -45,7 +48,7 @@ Item {
             Button {
                 text: qsTr("Open")
                 highlighted: true
-                enabled: page.backend.sharedFolder.length > 0
+                enabled: page.backend.sharedFolder !== ""
                 onClicked: page.backend.openSharedFolder()
             }
         }
@@ -68,9 +71,11 @@ Item {
                         text: qsTr("Phone access on the local network")
                         checked: page.backend.phoneAccess
                         enabled: page.backend.serviceConnected
+                        // toggle() puts the switch back without removing its binding (a click
+                        // does not either): it changes when the service reports the new state.
                         onToggled: {
                             page.backend.setPhoneAccess(checked)
-                            checked = Qt.binding(() => page.backend.phoneAccess)
+                            toggle()
                         }
                     }
                     Label {
@@ -82,16 +87,16 @@ Item {
                               : qsTr("Turn it on to show a QR code for your phone.")
                     }
                     Label {
-                        visible: page.backend.phoneError.length > 0
+                        visible: page.backend.phoneError !== ""
                         Layout.fillWidth: true
                         wrapMode: Text.WordWrap
-                        color: Material.color(Material.Red)
+                        color: "#f44336" // Material.color(Material.Red), spelled out so it compiles to C++
                         text: page.backend.phoneError
                     }
                     ComboBox {
-                        visible: page.backend.phoneRunning && page.backend.phoneUrls.length > 1
+                        visible: page.backend.phoneRunning && page.phoneUrls.length > 1
                         Layout.fillWidth: true
-                        model: page.backend.phoneUrls.map(u => u.replace(/\/\?t=.*$/, ""))
+                        model: page.backend.phoneUrlLabels
                         currentIndex: page.urlIndex
                         onActivated: index => page.urlIndex = index
                     }
@@ -190,13 +195,13 @@ Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: 6
-                        color: Material.color(Material.BlueGrey, Material.Shade800)
+                        color: "#37474f" // Material.color(Material.BlueGrey, Material.Shade800)
                         clip: true
 
                         Image {
                             id: preview
                             anchors.fill: parent
-                            visible: !cell.fileIsDir && page.imageSuffixes.includes(cell.fileSuffix.toLowerCase())
+                            visible: !cell.fileIsDir && page.imageSuffixes.indexOf(cell.fileSuffix.toLowerCase()) >= 0
                             source: visible ? cell.fileUrl : ""
                             sourceSize: Qt.size(240, 180)
                             fillMode: Image.PreserveAspectCrop
@@ -280,7 +285,7 @@ Item {
 
     Connections {
         target: page.backend
-        function onSharedFolderRejected(path, reason) {
+        function onSharedFolderRejected(path: string, reason: string): void {
             rejectedDialog.path = path
             rejectedDialog.reason = reason
             rejectedDialog.open()

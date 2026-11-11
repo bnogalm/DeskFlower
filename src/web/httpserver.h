@@ -9,8 +9,17 @@
 // time and idle time protect the service, and a request body is only read once the gate accepts
 // the request's headers (the phone server: a valid session), so strangers cannot make it buffer
 // uploads.
+//
+// Memory is bounded by the client's own pace: requests are read from the socket only while the
+// answers to the previous ones are going out (kStreamHighWater queued at most) and no response is
+// being streamed, so a client that pipelines requests without reading, or keeps sending during a
+// download, is slowed down by the kernel (the socket's read buffer is capped) instead of filling
+// this process. A streamed body is cut at the announced length and the connection is closed if
+// the device ends early. Connections whose requests carry no valid session (the gate) are closed
+// after a short idle time, and when the table is full the longest idle one makes room.
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QHostAddress>
 #include <QIODevice>
@@ -65,10 +74,12 @@ public:
     static constexpr int kMaxConnections = 64;
     static constexpr int kMaxConnectionsPerAddress = 16;
     static constexpr int kIdleTimeoutMs = 60 * 1000;
+    static constexpr int kUnauthenticatedIdleMs = 5 * 1000; // no valid session on the last request
     static constexpr int kHeaderTimeoutMs = 15 * 1000; // first byte of a request -> end of its headers
 
-    // Decides from the headers (no body yet) whether a request with a body may send it; refused
-    // ones get 401 and the connection is closed.
+    // Decides from the headers (no body yet) whether a request carries a valid session: one with
+    // a body may send it only then (refused ones get 401 and the connection is closed), and a
+    // connection whose last request had none is closed after kUnauthenticatedIdleMs.
     using Gate = std::function<bool(const HttpRequest &)>;
 
     // maxBodyBytes: larger requests are answered with 413.
@@ -83,17 +94,23 @@ private:
     struct Connection;
 
     void onNewConnection();
+    static qint64 queued(const Connection *c);
+    static bool canRead(const Connection *c);
+    void resume(Connection *c);
     void processInput(Connection *c);
     // linger: closing is left to the caller (a refused body is being drained).
     void send(Connection *c, HttpResponse response, bool keepAlive, bool linger = false);
     void pump(Connection *c);
     void drop(Connection *c);
+    void dropLater(Connection *c);
+    void touch(Connection *c);
 
     Handler m_handler;
     Gate m_gate;
     qint64 m_maxBody;
     QSslServer *m_server = nullptr;
     QHash<QSslSocket *, Connection *> m_connections;
+    QElapsedTimer m_clock; // for Connection::lastActivity
 };
 
 const char *reasonPhrase(int status);

@@ -87,6 +87,79 @@ bool opensInBrowser(const QMimeType &type)
     return kTypes.contains(name) || name.startsWith(QLatin1String("video/")) || name.startsWith(QLatin1String("audio/"));
 }
 
+// Serves a byte range [0, length) of an already-open, already-positioned file, so the HTTP layer
+// (which streams response.stream and reports Content-Length from its size()) sends exactly the
+// requested bytes.
+class RangeDevice : public QIODevice
+{
+public:
+    RangeDevice(std::unique_ptr<QFile> file, qint64 length) : m_file(std::move(file)), m_remaining(length), m_length(length)
+    {
+    }
+    qint64 size() const override { return m_length; }
+    bool isSequential() const override { return true; }
+
+protected:
+    qint64 readData(char *data, qint64 maxlen) override
+    {
+        if (m_remaining <= 0)
+            return 0;
+        const qint64 n = m_file->read(data, qMin(maxlen, m_remaining));
+        if (n > 0)
+            m_remaining -= n;
+        return n;
+    }
+    qint64 writeData(const char *, qint64) override { return -1; }
+
+private:
+    std::unique_ptr<QFile> m_file;
+    qint64 m_remaining;
+    qint64 m_length;
+};
+
+enum class RangeResult { None, Single, Full, Unsatisfiable };
+
+// Parses a single "bytes=" range against a known total size. Multi-range (a comma) is served whole
+// (RangeResult::Full) so there is no amplification; a malformed header is ignored (None, serve
+// whole); a well-formed range outside the file is Unsatisfiable (416).
+RangeResult parseRange(const QByteArray &header, qint64 total, qint64 *start, qint64 *length)
+{
+    if (!header.startsWith("bytes="))
+        return RangeResult::None;
+    const QByteArray spec = header.mid(6).trimmed();
+    if (spec.contains(','))
+        return RangeResult::Full;
+    const int dash = spec.indexOf('-');
+    if (dash < 0)
+        return RangeResult::None;
+    const QByteArray a = spec.left(dash).trimmed();
+    const QByteArray b = spec.mid(dash + 1).trimmed();
+    bool okA = false, okB = false;
+    qint64 begin = 0, end = total - 1;
+    if (a.isEmpty()) {
+        // Suffix range: the last N bytes.
+        const qint64 n = b.toLongLong(&okB);
+        if (!okB || n <= 0)
+            return RangeResult::None;
+        begin = qMax<qint64>(0, total - n);
+    } else {
+        begin = a.toLongLong(&okA);
+        if (!okA || begin < 0)
+            return RangeResult::None;
+        if (!b.isEmpty()) {
+            end = b.toLongLong(&okB);
+            if (!okB)
+                return RangeResult::None;
+            end = qMin(end, total - 1);
+        }
+    }
+    if (begin > end || begin >= total)
+        return RangeResult::Unsatisfiable;
+    *start = begin;
+    *length = end - begin + 1;
+    return RangeResult::Single;
+}
+
 HttpResponse json(const QJsonObject &obj, int status = 200)
 {
     return respond(status, QJsonDocument(obj).toJson(QJsonDocument::Compact), "application/json");
@@ -225,8 +298,13 @@ bool PhoneServer::start(QString *error)
     auto http = std::make_unique<HttpServer>([this](const HttpRequest &r) { return handle(r); }, kMaxChunk);
     // Only signed-in phones may send bodies (uploads, text).
     http->setBodyGate([this](const HttpRequest &r) { return authorized(r); });
+    // Every interface (phones are on the network), unless DESKFLOWER_BIND_ADDRESS names one: the
+    // tests set 127.0.0.1, so that no firewall prompt comes up for a test binary (as for Node).
+    QHostAddress address(QHostAddress::AnyIPv4);
+    if (const QByteArray bind = qgetenv("DESKFLOWER_BIND_ADDRESS"); !bind.isEmpty())
+        address.setAddress(QString::fromLatin1(bind));
     QString listenError;
-    if (!http->listen(tls, QHostAddress::AnyIPv4, m_options.port, &listenError)) {
+    if (!http->listen(tls, address, m_options.port, &listenError)) {
         *error = QStringLiteral("Cannot listen on HTTPS port %1: %2").arg(m_options.port).arg(listenError);
         return false;
     }
@@ -295,7 +373,16 @@ bool PhoneServer::authorized(const HttpRequest &request) const
     if (id.isEmpty())
         return false;
     auto it = m_sessions.constFind(hashed(id));
-    return it != m_sessions.constEnd() && it->expires > QDateTime::currentDateTimeUtc();
+    if (it == m_sessions.constEnd() || it->expires <= QDateTime::currentDateTimeUtc())
+        return false;
+    // The session belongs to the user who granted it: once another user is at the console it is no
+    // longer valid (the service follows whoever is at the console). Nobody signed in: left as is.
+    if (m_options.userId) {
+        const QString current = m_options.userId();
+        if (!current.isEmpty() && !it->user.isEmpty() && it->user != current)
+            return false;
+    }
+    return true;
 }
 
 QString PhoneServer::resolve(const QString &relative, bool mustExist) const
@@ -425,7 +512,8 @@ HttpResponse PhoneServer::serveIndex(const HttpRequest &request)
         emit accessTokenChanged();
         const QString id = randomHex(32);
         m_sessions.insert(hashed(id), Session{QDateTime::currentDateTimeUtc().addSecs(kSessionHours * 3600),
-                                              request.remoteAddress.toString()});
+                                              request.remoteAddress.toString(),
+                                              m_options.userId ? m_options.userId() : QString()});
         emit sessionsChanged();
         HttpResponse response = respond(303, {}, "text/plain");
         // Lax, not Strict: the scan opens the browser from the camera app, a cross-site navigation,
@@ -489,12 +577,38 @@ HttpResponse PhoneServer::serveFile(const HttpRequest &request)
     const QString name = QFileInfo(path).fileName();
     const QMimeType type = QMimeDatabase().mimeTypeForFile(path);
     const bool open = opensInBrowser(type) && request.queryValue(QStringLiteral("dl")) != QLatin1String("1");
+    const qint64 total = file->size();
     // Downloads go as a neutral type: the browser saves them, it never renders them.
     HttpResponse response = respond(200, {}, open ? type.name().toLatin1() : QByteArray("application/octet-stream"));
     response.header("Content-Disposition", QByteArray(open ? "inline" : "attachment")
                                                + "; filename*=UTF-8''" + QUrl::toPercentEncoding(name));
     if (open && type.name() != QLatin1String("application/pdf")) // browsers refuse sandboxed PDFs
         response.header("Content-Security-Policy", "sandbox");
+    // Range requests, for media playback and seeking on the phone (iOS Safari needs 206).
+    response.header("Accept-Ranges", "bytes");
+    const QByteArray rangeHeader = request.header("range");
+    if (!rangeHeader.isEmpty()) {
+        qint64 start = 0, length = 0;
+        const RangeResult rr = parseRange(rangeHeader, total, &start, &length);
+        if (rr == RangeResult::Unsatisfiable) {
+            HttpResponse r = respond(416);
+            r.header("Content-Range", "bytes */" + QByteArray::number(total));
+            r.header("Accept-Ranges", "bytes");
+            return r;
+        }
+        if (rr == RangeResult::Single) {
+            file->seek(start);
+            response.status = 206;
+            response.header("Content-Range", "bytes " + QByteArray::number(start) + '-'
+                                                 + QByteArray::number(start + length - 1) + '/'
+                                                 + QByteArray::number(total));
+            auto ranged = std::make_unique<RangeDevice>(std::move(file), length);
+            ranged->open(QIODevice::ReadOnly);
+            response.stream = std::move(ranged);
+            return response;
+        }
+        // None (ignore a malformed header) or Full (a multi-range request): serve the whole file.
+    }
     response.stream = std::move(file); // streamed from disk
     return response;
 }

@@ -2,8 +2,10 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QXmlStreamReader>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -54,7 +56,17 @@ bool samePath(const QString &a, const QString &b)
 // A scratch folder that may be shared: an ordinary folder in the home folder (the temporary
 // folder is not one: on Windows it is in AppData). Removed afterwards.
 QString inHome() { return QDir::homePath() + QStringLiteral("/deskflower-test-XXXXXX"); }
+
+// Cases that create folders in the real user's profile (a scratch folder in the home folder, the
+// received folder in AppData) only run where that is allowed: CI, a VM, a container.
+bool mayWriteProfile() { return qgetenv("DESKFLOWER_DESKTOP_TESTS") == "1"; }
 } // namespace
+
+#define REQUIRE_PROFILE_WRITES() \
+    do { \
+        if (!mayWriteProfile()) \
+            QSKIP("writes in the user's profile folders: set DESKFLOWER_DESKTOP_TESTS=1 (docs/TESTING.md)"); \
+    } while (false)
 
 class TestPlatform : public QObject
 {
@@ -132,6 +144,7 @@ private slots:
         QVERIFY(impersonating());
         RevertToSelf();
 
+        REQUIRE_PROFILE_WRITES();
         QTemporaryDir dir(inHome()); // an ordinary folder, but nobody is signed in
         const QString fallback = dir.filePath(QStringLiteral("Fallback"));
         QCOMPARE(platform::sharedFolder(dir.filePath(QStringLiteral("Shared")), fallback, true), fallback);
@@ -141,6 +154,7 @@ private slots:
     // in ProgramData that the user cannot reach ("the folder is unavailable" on the phone).
     void sharedFolderWhileActingAsTheUser()
     {
+        REQUIRE_PROFILE_WRITES();
         QTemporaryDir dir(inHome());
         QVERIFY(dir.isValid());
         const QString chosen = dir.filePath(QStringLiteral("Shared"));
@@ -171,6 +185,7 @@ private slots:
     // not a folder that could ever be chosen as the shared one.
     void receivedFilesAreApartFromTheSharedFolder()
     {
+        REQUIRE_PROFILE_WRITES();
 #ifdef Q_OS_WIN
         const bool serviceMode = true; // through the fake console user
 #else
@@ -255,6 +270,7 @@ private slots:
     void sharedFolderAsTheUser()
     {
         // Not a Windows service: the process already runs as the user; any absolute folder works.
+        REQUIRE_PROFILE_WRITES();
         QTemporaryDir dir(inHome());
         const QString chosen = dir.filePath(QStringLiteral("a/b"));
         QCOMPARE(platform::sharedFolder(chosen, dir.filePath(QStringLiteral("Fallback")), false), chosen);
@@ -263,6 +279,81 @@ private slots:
         QVERIFY(!platform::isAllowedSharedFolder(QStringLiteral("relative/path"), false));
         QVERIFY(!platform::isAllowedSharedFolder(QDir::homePath(), false));
         QVERIFY(!platform::isAllowedSharedFolder(QDir::rootPath(), false));
+    }
+
+#ifdef Q_OS_WIN
+    // What "Allow devices on other networks" gives the public-network rule (netsh itself is never
+    // run by the tests).
+    void firewallScope()
+    {
+        QCOMPARE(platform::firewallPublicRemoteIps(false), QStringLiteral("localsubnet"));
+        const QStringList wide = platform::firewallPublicRemoteIps(true).split(QLatin1Char(','));
+        QCOMPARE(wide.first(), QStringLiteral("localsubnet"));
+        for (const QString &range : {QStringLiteral("10.0.0.0/8"), QStringLiteral("172.16.0.0/12"),
+                                     QStringLiteral("192.168.0.0/16"), QStringLiteral("100.64.0.0/10"),
+                                     QStringLiteral("169.254.0.0/16")})
+            QVERIFY2(wide.contains(range), qPrintable(range));
+        QCOMPARE(wide.size(), 6); // nothing public
+        QVERIFY(platform::firewallScopeSupported(true));
+        QVERIFY(!platform::firewallScopeSupported(false));
+    }
+#endif
+
+    void launchAgentPlists()
+    {
+        // The macOS LaunchAgents (service, agent at sign-in): well-formed whatever the bundle's
+        // path holds, with exactly the values given.
+        platform::LaunchAgent agent;
+        agent.label = QStringLiteral("com.deskflower.service");
+        agent.arguments = {QStringLiteral("/Users/a & b/<Apps>/DeskFlower.app/Contents/MacOS/deskflower-service"),
+                           QStringLiteral("--minimized")};
+        agent.environment = {{QStringLiteral("DYLD_FALLBACK_LIBRARY_PATH"), QStringLiteral("/x/Frameworks:/usr/lib")}};
+        agent.keepAlive = true;
+        agent.associatedBundle = QStringLiteral("com.deskflower.agent");
+        agent.logPath = QStringLiteral("/Users/a/Library/Logs/Deskflower/service.log");
+        const QHash<QString, QStringList> keys = plistValues(platform::launchAgentPlist(agent));
+        QCOMPARE(keys.value(QStringLiteral("Label")), QStringList{agent.label});
+        QCOMPARE(keys.value(QStringLiteral("ProgramArguments")), agent.arguments);
+        QCOMPARE(keys.value(QStringLiteral("DYLD_FALLBACK_LIBRARY_PATH")),
+                 QStringList{QStringLiteral("/x/Frameworks:/usr/lib")});
+        QCOMPARE(keys.value(QStringLiteral("AssociatedBundleIdentifiers")), QStringList{agent.associatedBundle});
+        QCOMPARE(keys.value(QStringLiteral("StandardErrorPath")), QStringList{agent.logPath});
+        QCOMPARE(keys.value(QStringLiteral("LimitLoadToSessionType")), QStringList{QStringLiteral("Aqua")});
+        QVERIFY(keys.contains(QStringLiteral("RunAtLoad")));
+        QVERIFY(keys.contains(QStringLiteral("KeepAlive")));
+
+        // The agent's: no restart, no environment, no log.
+        platform::LaunchAgent plain;
+        plain.label = QStringLiteral("com.deskflower.agent");
+        plain.arguments = {QStringLiteral("/Applications/DeskFlower.app/Contents/MacOS/DeskFlower")};
+        const QHash<QString, QStringList> plainKeys = plistValues(platform::launchAgentPlist(plain));
+        QCOMPARE(plainKeys.value(QStringLiteral("ProgramArguments")), plain.arguments);
+        QVERIFY(!plainKeys.contains(QStringLiteral("KeepAlive")));
+        QVERIFY(!plainKeys.contains(QStringLiteral("EnvironmentVariables")));
+        QVERIFY(!plainKeys.contains(QStringLiteral("StandardErrorPath")));
+    }
+
+private:
+    // Every <key> of a property list with the strings that follow it (an array's strings), parsed
+    // as XML: a malformed document fails the test.
+    static QHash<QString, QStringList> plistValues(const QByteArray &plist)
+    {
+        QHash<QString, QStringList> values;
+        QXmlStreamReader xml(plist);
+        QString key;
+        while (!xml.atEnd()) {
+            if (xml.readNext() != QXmlStreamReader::StartElement)
+                continue;
+            if (xml.name() == QLatin1String("key")) {
+                key = xml.readElementText();
+                values.insert(key, {});
+            } else if (xml.name() == QLatin1String("string") && !key.isEmpty()) {
+                values[key].append(xml.readElementText());
+            }
+        }
+        if (xml.hasError())
+            qWarning() << "Malformed property list:" << xml.errorString();
+        return xml.hasError() ? QHash<QString, QStringList>() : values;
     }
 };
 

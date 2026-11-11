@@ -24,6 +24,17 @@ struct Crossing {
     QPoint point; // in the target device's native coordinates
 };
 
+// A stretch of a screen's outer edge behind which another device lies: pushing the cursor past
+// `side` of `screen` at an along-edge coordinate (y for Left/Right, x for Top/Bottom) between
+// `from` and `to` (inclusive, in the screen's own coordinates) would cross into `device`.
+struct EdgeSpan {
+    QRect screen;
+    Side side = Side::Right;
+    int from = 0;
+    int to = 0;
+    QByteArray device;
+};
+
 class Router
 {
 public:
@@ -37,6 +48,11 @@ public:
     QPoint clamp(const QByteArray &device, QPoint from, QPoint to) const;
     // Where a cursor at `p` on `device` pushing past `side` ends up, if another device is there.
     std::optional<Crossing> cross(const QByteArray &device, QPoint p, Side side) const;
+    // Every stretch of the device's screen edges where cross() would find another device (the
+    // same gap rule), one span per neighbouring screen; where two neighbours overlap along an
+    // edge, the stretch goes to the one cross() would pick (the nearer). Pure geometry: whether
+    // that device is connected or willing is for the caller to decide.
+    QList<EdgeSpan> neighbourSpans(const QByteArray &device) const;
     // Whether the cursor can go from `from` to `to` through screen edges (directly or across other
     // devices), by the same rule as cross: screens of two devices that overlap along an edge and
     // are at most kMaxGap apart across it. False if either device has no screens.

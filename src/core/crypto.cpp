@@ -107,6 +107,37 @@ std::optional<QByteArray> aeadDecrypt(const QByteArray &key, quint64 nonce, cons
     return out;
 }
 
+QByteArray sealKey() { return randomBytes(kKeySize); }
+
+QByteArray seal(const QByteArray &key, const QByteArray &ad, const QByteArray &plaintext)
+{
+    static_assert(crypto_aead_xchacha20poly1305_ietf_NPUBBYTES == kSealNonceSize);
+    static_assert(crypto_aead_xchacha20poly1305_ietf_ABYTES == kTagSize);
+    QByteArray out(kSealNonceSize + plaintext.size() + kTagSize, Qt::Uninitialized);
+    randombytes_buf(out.data(), kSealNonceSize);
+    unsigned long long outLen = 0;
+    crypto_aead_xchacha20poly1305_ietf_encrypt(u(out) + kSealNonceSize, &outLen, u(plaintext),
+                                               quint64(plaintext.size()), u(ad), quint64(ad.size()), nullptr,
+                                               u(out), u(key));
+    out.resize(kSealNonceSize + qsizetype(outLen));
+    return out;
+}
+
+std::optional<QByteArray> unseal(const QByteArray &key, const QByteArray &ad, const QByteArray &sealed)
+{
+    if (sealed.size() < kSealOverhead || key.size() != kKeySize)
+        return std::nullopt;
+    QByteArray out(sealed.size() - kSealOverhead, Qt::Uninitialized);
+    unsigned long long outLen = 0;
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(u(out), &outLen, nullptr, u(sealed) + kSealNonceSize,
+                                                   quint64(sealed.size() - kSealNonceSize), u(ad),
+                                                   quint64(ad.size()), u(sealed), u(key))
+        != 0)
+        return std::nullopt;
+    out.resize(qsizetype(outLen));
+    return out;
+}
+
 QByteArray deviceIdFromPublicKey(const QByteArray &publicKey)
 {
     static const QByteArray kPersonal("deskflower-id");

@@ -93,7 +93,7 @@ private:
     QImage m_last;
 };
 
-ScreenStreamer::ScreenStreamer(QObject *parent) : QObject(parent)
+ScreenStreamer::ScreenStreamer(int index, QObject *parent) : QObject(parent), m_index(index)
 {
     std::unique_ptr<ScreenGrabber> grabber = ScreenGrabber::create();
     m_hasNativeGrabber = grabber != nullptr;
@@ -104,7 +104,10 @@ ScreenStreamer::ScreenStreamer(QObject *parent) : QObject(parent)
         if (!m_running || generation != m_generation)
             return;
         m_failures = 0;
-        emit frameReady(frame);
+        QCborMap tagged = frame;
+        tagged.insert(QStringLiteral("i"), m_index);
+        tagged.insert(QStringLiteral("g"), qint64(m_sourceGeneration));
+        emit frameReady(tagged);
     });
     connect(m_worker, &CaptureWorker::captureFailed, this, [this](quint32 generation) {
         if (generation == m_generation)
@@ -123,15 +126,18 @@ ScreenStreamer::~ScreenStreamer()
     m_thread.wait();
 }
 
-void ScreenStreamer::start(QSize maxSize, const QRect &screen)
+void ScreenStreamer::start(QSize maxSize, const QRect &screen, quint32 generation)
 {
+    m_pace.stop(); // started again while running: no second frame from the pacing or a retry
     m_maxSize = maxSize;
     m_screen = screen;
-    m_forceFull = false;
+    m_sourceGeneration = generation;
+    m_forceFull = true;
     QMetaObject::invokeMethod(m_worker, [w = m_worker, screen] { w->setScreen(screen); }, Qt::QueuedConnection);
     m_running = true;
     ++m_generation;
-    m_seq = 0;
+    // m_seq goes on: a restart (another size for the same screen) must not reuse the number of a
+    // frame the viewer may still acknowledge.
     m_failures = 0;
     QMetaObject::invokeMethod(m_worker, &CaptureWorker::reset, Qt::QueuedConnection);
     request();
@@ -150,6 +156,15 @@ void ScreenStreamer::stop()
 {
     m_running = false;
     m_pace.stop();
+}
+
+void ScreenStreamer::shutdown()
+{
+    stop();
+    // The destructor's wait() then finds the thread gone (a capture in progress ends on its own,
+    // its result dropped: not running).
+    connect(&m_thread, &QThread::finished, this, &QObject::deleteLater);
+    m_thread.quit();
 }
 
 void ScreenStreamer::next()

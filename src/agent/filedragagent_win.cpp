@@ -3,6 +3,7 @@
 #include "virtualfiles.h"
 
 #include <QCursor>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QImage>
 #include <QPainter>
@@ -12,6 +13,7 @@
 
 #include <windows.h>
 #include <ole2.h> // before exdisp.h: WIN32_LEAN_AND_MEAN leaves OLE out of windows.h
+#include <dwmapi.h>
 #include <exdisp.h>
 #include <oleidl.h>
 #include <shellapi.h>
@@ -21,6 +23,8 @@
 #include <atomic>
 #include <thread>
 
+// Milestones of drags go to the agent's always-on drag log (installDiagnosticLog in main.cpp):
+// counts, effects, results and window classes, never names or paths.
 Q_LOGGING_CATEGORY(lcDragAgent, "deskflower.agent.drag")
 
 namespace {
@@ -152,9 +156,15 @@ public:
             delete this;
         return ULONG(ref);
     }
-    HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL, DWORD) override
+    HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL escape, DWORD) override
     {
-        // Escape is the master's to decide too: keys typed here go to the device with the cursor.
+        // Escape typed here (by the user at this device, or by the master's keyboard, whose keys go
+        // to the device with the cursor) cancels, as it would a local drag. The button state is
+        // not used: the master's button is not held here (the catch released it).
+        if (escape && state.load() == State::Dragging) {
+            qCInfo(lcDragAgent) << "Escape: the drag here is cancelled";
+            state = State::Cancel;
+        }
         switch (state.load()) {
         case State::Drop: return DRAGDROP_S_DROP;
         case State::Cancel: return DRAGDROP_S_CANCEL;
@@ -303,17 +313,66 @@ QString explorerFolder(HWND root)
     return result;
 }
 
+// When the user's own left button (not an injected one) was last released, while a drag driven
+// by this device's mouse is shown (see watchDrag).
+std::atomic<qint64> g_localRelease{0};
+HHOOK g_mouseHook = nullptr;
+
+LRESULT CALLBACK mouseHookProc(int code, WPARAM wp, LPARAM lp)
+{
+    if (code == HC_ACTION && wp == WM_LBUTTONUP) {
+        const auto *info = reinterpret_cast<const MSLLHOOKSTRUCT *>(lp);
+        if (!(info->flags & LLMHF_INJECTED))
+            g_localRelease = QDateTime::currentMSecsSinceEpoch();
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+
+// The top-level window under a point, looking through the drag image, windows of this process
+// (the badge) and windows that are not really shown.
+HWND windowUnder(POINT p)
+{
+    auto skip = [](HWND w) {
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w, &pid);
+        if (pid == GetCurrentProcessId())
+            return true;
+        wchar_t cls[64] = {};
+        GetClassNameW(w, cls, 64);
+        return wcscmp(cls, L"SysDragImage") == 0;
+    };
+    HWND root = GetAncestor(WindowFromPoint(p), GA_ROOT);
+    if (root && !skip(root))
+        return root;
+    for (HWND w = GetTopWindow(nullptr); w; w = GetWindow(w, GW_HWNDNEXT)) {
+        if (!IsWindowVisible(w) || skip(w) || (GetWindowLongW(w, GWL_EXSTYLE) & WS_EX_TRANSPARENT))
+            continue;
+        BOOL cloaked = FALSE;
+        if (SUCCEEDED(DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
+            continue;
+        RECT r = {};
+        if (GetWindowRect(w, &r) && PtInRect(&r, p))
+            return w;
+    }
+    return nullptr;
+}
+
 } // namespace
 
+// Shared by the agent's main thread and the drag's thread, which outlives the drag loop while a
+// drop target extracts virtual files on its own thread (async mode).
 struct FileDragAgent::Hover {
     HoverSpec spec;
     ClipboardBridge::FetchFiles fetch;
-    std::function<void(bool, bool)> done;
-    HoverSource *source = nullptr; // while the drag runs (on its own thread)
-    std::atomic_bool transferred = false;
+    std::function<void(const HoverResult &)> done;           // main thread
+    HoverSource *source = nullptr;                            // while the drag loop runs
+    std::atomic_bool fetched = false;                         // the virtual files were transferred
+    std::atomic_bool abandoned = false;                       // stop waiting for the drop target
     std::atomic<DWORD> thread = 0;
-    POINT lastFed = {LONG_MIN, LONG_MIN};
+    POINT lastFed = {LONG_MIN, LONG_MIN};                     // main thread
     HoverSource::State requested = HoverSource::State::Dragging; // asked before the drag started
+    QString folder;     // main thread: released over this folder (the service transfers into it)
+    qint64 lastAlive = 0; // main thread: when the service last said it is there
 };
 
 struct FileDragAgent::Catcher {
@@ -335,6 +394,8 @@ FileDragAgent::FileDragAgent(QObject *parent) : QObject(parent)
 
     m_feed.setInterval(15);
     connect(&m_feed, &QTimer::timeout, this, &FileDragAgent::feedDrag);
+    m_watch.setInterval(250);
+    connect(&m_watch, &QTimer::timeout, this, &FileDragAgent::watchDrag);
 
     m_follow.setInterval(30);
     connect(&m_follow, &QTimer::timeout, this, [this] {
@@ -347,36 +408,119 @@ FileDragAgent::~FileDragAgent()
 {
     if (m_catcher)
         finishCatch();
+    if (g_mouseHook) {
+        UnhookWindowsHookEx(g_mouseHook);
+        g_mouseHook = nullptr;
+    }
 }
 
-void FileDragAgent::hover(const HoverSpec &spec, ClipboardBridge::FetchFiles fetch, std::function<void(bool, bool)> done)
+bool FileDragAgent::supportsNativeDrag()
 {
-    auto next = std::make_unique<Hover>();
+    return true;
+}
+
+void FileDragAgent::hover(const HoverSpec &spec, ClipboardBridge::FetchFiles fetch,
+                          std::function<void(const HoverResult &)> done)
+{
+    auto next = std::make_shared<Hover>();
     next->spec = spec;
     next->fetch = std::move(fetch);
     next->done = std::move(done);
+    next->lastAlive = QDateTime::currentMSecsSinceEpoch();
     if (m_inDrag) {
-        // One drag at a time: the current one is cancelled, this one starts once it has ended.
+        // One drag at a time: the current one is cancelled, this one starts once its loop ended.
         if (m_nextHover && m_nextHover->done)
-            m_nextHover->done(false, false);
+            std::exchange(m_nextHover->done, nullptr)(HoverResult{});
         m_nextHover = std::move(next);
-        endHover(false);
+        cancelHere("superseded");
         return;
     }
+    if (m_hover && m_hover->done) // replaced before its loop started: it never ran
+        std::exchange(m_hover->done, nullptr)(HoverResult{});
     m_hover = std::move(next);
     QTimer::singleShot(0, this, &FileDragAgent::runHover);
 }
 
 void FileDragAgent::endHover(bool drop)
 {
-    const auto state = drop ? HoverSource::State::Drop : HoverSource::State::Cancel;
-    if (m_hover && m_hover->source) {
-        m_hover->source->state = state;
+    if (!m_hover)
+        return;
+    auto state = drop ? HoverSource::State::Drop : HoverSource::State::Cancel;
+    if (drop && !m_hover->spec.own) {
+        // Over a folder window or the desktop, Explorer would wait inside the drop, with nothing to
+        // show, for the whole transfer: the service transfers into that folder instead, with its
+        // progress shown. Virtual files remain for applications (browser, mail...).
+        POINT p = {};
+        GetCursorPos(&p);
+        const QString folder = folderAt(QPoint(p.x, p.y));
+        if (!folder.isEmpty()) {
+            qCInfo(lcDragAgent) << "Released over a folder window or the desktop: handed to the service";
+            m_hover->folder = folder;
+            state = HoverSource::State::Cancel;
+        }
+    }
+    if (m_hover->source) {
+        if (m_hover->source->state == HoverSource::State::Dragging)
+            m_hover->source->state = state;
         m_hover->lastFed = {LONG_MIN, LONG_MIN};
         feedDrag(); // the drag loop asks the source again on mouse input
-    } else if (m_hover) {
+    } else {
         m_hover->requested = state;
     }
+}
+
+void FileDragAgent::alive()
+{
+    // A service that says it is there will keep saying it: from now on its silence counts.
+    for (const auto &h : {m_hover, m_nextHover}) {
+        if (h) {
+            h->lastAlive = QDateTime::currentMSecsSinceEpoch();
+            h->spec.heartbeat = true;
+        }
+    }
+}
+
+void FileDragAgent::serviceLost()
+{
+    if (m_nextHover && m_nextHover->done)
+        std::exchange(m_nextHover->done, nullptr)(HoverResult{});
+    m_nextHover.reset();
+    if (m_hover) {
+        m_hover->abandoned = true; // also stops waiting for an extraction in progress
+        cancelHere("the service is gone");
+    }
+}
+
+void FileDragAgent::cancelHere(const char *why)
+{
+    if (!m_hover)
+        return;
+    if (m_hover->source) {
+        if (m_hover->source->state != HoverSource::State::Dragging)
+            return;
+        qCInfo(lcDragAgent) << "Drag here cancelled:" << why;
+        m_hover->source->state = HoverSource::State::Cancel;
+        m_hover->lastFed = {LONG_MIN, LONG_MIN};
+        feedDrag();
+    } else {
+        m_hover->requested = HoverSource::State::Cancel;
+    }
+}
+
+// Escape hatches, so that a drag never stays on screen: Escape (also checked here, since the drag
+// loop does not always get the key), the service silent for too long, or (this device being the
+// master) the user's own button released with no word from the service.
+void FileDragAgent::watchDrag()
+{
+    if (!m_hover || !m_hover->source || m_hover->source->state != HoverSource::State::Dragging)
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (GetAsyncKeyState(VK_ESCAPE) & 0x8000)
+        cancelHere("Escape");
+    else if (m_hover->spec.heartbeat && now - m_hover->lastAlive > kAliveTimeoutMs)
+        cancelHere("no word from the service");
+    else if (m_hover->spec.local && g_localRelease > 0 && now - g_localRelease > kLocalReleaseGraceMs)
+        cancelHere("the button was released here and the service did not end the drag");
 }
 
 // The drag loop captures the mouse with a window of its thread, but only the foreground window
@@ -404,12 +548,14 @@ void FileDragAgent::runHover()
 {
     if (!m_hover || m_inDrag)
         return;
-    Hover *h = m_hover.get();
+    std::shared_ptr<Hover> h = m_hover;
     if (h->requested != HoverSource::State::Dragging) { // ended before it began
-        auto done = std::move(h->done);
+        HoverResult result;
+        result.folder = h->folder;
+        auto done = std::exchange(h->done, nullptr);
         m_hover.reset();
         if (done)
-            done(false, false);
+            done(result);
         return;
     }
     // The drag loop blocks its thread and dispatches only what OLE needs: on the agent's main
@@ -419,6 +565,12 @@ void FileDragAgent::runHover()
     m_inDrag = true;
     QTimer::singleShot(80, this, [] { wiggle(); }); // the drag loop then finds the target under the cursor
     m_feed.start();
+    m_watch.start();
+    g_localRelease = 0;
+    if (h->spec.local && !g_mouseHook)
+        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, mouseHookProc, GetModuleHandleW(nullptr), 0);
+    qCInfo(lcDragAgent) << "Drag here starts:" << (h->spec.own ? int(h->spec.paths.size()) : h->spec.count)
+                        << (h->spec.own ? "originals" : "virtual items") << (h->spec.local ? "(local mouse)" : "");
     std::thread([this, h] {
         h->thread = GetCurrentThreadId();
         OleInitialize(nullptr);
@@ -426,44 +578,84 @@ void FileDragAgent::runHover()
         if (h->spec.own) {
             data = shellDataObject(h->spec.paths);
         } else {
+            // Move preferred: a folder view that honours it reports a move, the only drop that sends
+            // the originals to the Recycle Bin; an application that attaches or uploads reports a
+            // copy, and the originals stay.
             data = createVirtualFiles(h->spec.files, [h](QString *error) {
-                QStringList items = h->fetch ? h->fetch(error) : QStringList(); // blocking: the drop waits
-                h->transferred = !items.isEmpty();
+                // Blocking, on this thread: a synchronous drop waits; an async one shows progress.
+                QStringList items = h->fetch ? h->fetch(error) : QStringList();
+                h->fetched = !items.isEmpty();
                 return items;
-            });
+            }, DROPEFFECT_MOVE, true);
         }
         bool dropped = false;
+        DropReport report;
         if (data) {
             const QString first = h->spec.own ? QFileInfo(h->spec.paths.value(0)).fileName()
                                               : h->spec.files.value(0).path.section(QLatin1Char('/'), 0, 0);
             const bool folder = h->spec.own ? QFileInfo(h->spec.paths.value(0)).isDir()
-                                            : h->spec.files.value(0).path.contains(QLatin1Char('/'));
+                                            : h->spec.files.value(0).dir || h->spec.files.value(0).path.contains(QLatin1Char('/'));
             setDragImage(data, first, folder, h->spec.own ? int(h->spec.paths.size()) : h->spec.count);
             DWORD effect = DROPEFFECT_NONE;
             const HRESULT hr = SHDoDragDrop(nullptr, data, h->source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &effect);
-            // An optimised move (Explorer moving our own files itself) reports DROPEFFECT_NONE, so
-            // the drop counts, not the effect; virtual files must also have been transferred.
             dropped = hr == DRAGDROP_S_DROP;
-            qCInfo(lcDragAgent) << "Drag here ended:" << (dropped ? "dropped" : "not dropped") << "effect" << effect;
+            qCInfo(lcDragAgent) << "Drag loop ended:" << (dropped ? "dropped" : "not dropped") << "hr" << Qt::hex
+                                << quint32(hr) << "effect" << Qt::dec << effect;
+            // The next drag may start now; this thread stays to serve a target still at work.
+            QMetaObject::invokeMethod(this, [this, h] {
+                if (h->source) {
+                    h->source->Release();
+                    h->source = nullptr;
+                }
+                m_inDrag = false;
+                m_feed.stop();
+                m_watch.stop();
+                if (g_mouseHook) {
+                    UnhookWindowsHookEx(g_mouseHook);
+                    g_mouseHook = nullptr;
+                }
+                if (m_hover == h)
+                    m_hover.reset();
+                if (m_nextHover) {
+                    m_hover = std::move(m_nextHover);
+                    QTimer::singleShot(0, this, &FileDragAgent::runHover);
+                }
+            }, Qt::QueuedConnection);
+            if (dropped) {
+                // A target in async mode (the shell's) extracts on its own thread and calls back
+                // into the object on this one: keep the apartment alive until it is done.
+                if (!waitForAsyncDrop(data, kAsyncDropTimeoutMs, [h] { return h->abandoned.load(); }))
+                    qCWarning(lcDragAgent) << "Stopped waiting for the drop target to finish";
+                report = dropReport(data);
+            }
             data->Release();
+        } else {
+            qCWarning(lcDragAgent) << "No data object for the drag";
+            QMetaObject::invokeMethod(this, [this, h] {
+                if (h->source) {
+                    h->source->Release();
+                    h->source = nullptr;
+                }
+                m_inDrag = false;
+                m_feed.stop();
+                m_watch.stop();
+                if (m_hover == h)
+                    m_hover.reset();
+            }, Qt::QueuedConnection);
         }
         OleUninitialize();
-        QMetaObject::invokeMethod(this, [this, h, dropped] {
-            m_inDrag = false;
-            m_feed.stop();
-            if (m_hover.get() != h)
-                return;
-            h->source->Release();
-            h->source = nullptr;
-            auto done = std::move(h->done);
-            const bool transferred = h->transferred;
-            m_hover.reset();
-            if (done)
-                done(dropped, transferred);
-            if (m_nextHover) {
-                m_hover = std::move(m_nextHover);
-                QTimer::singleShot(0, this, &FileDragAgent::runHover);
-            }
+        QMetaObject::invokeMethod(this, [h, dropped, report] {
+            HoverResult result;
+            result.dropped = dropped;
+            result.folder = h->folder;
+            // Only a confirmed move of virtual files that really were transferred lets the
+            // originals go; an optimised move of our own originals is Windows' business.
+            result.confirmed = !h->spec.own && dropped && h->fetched && report.moved();
+            qCInfo(lcDragAgent) << "Drag here result: dropped" << dropped << "transferred" << h->fetched.load()
+                                << "reported effect" << report.effect << "async failed" << report.asyncFailed
+                                << "confirmed" << result.confirmed << "into a folder" << !result.folder.isEmpty();
+            if (auto done = std::exchange(h->done, nullptr))
+                done(result);
         }, Qt::QueuedConnection);
     }).detach();
 }
@@ -541,8 +733,7 @@ void FileDragAgent::finishCatch()
 
 QString FileDragAgent::folderAt(QPoint at) const
 {
-    const POINT p = {at.x(), at.y()};
-    HWND root = GetAncestor(WindowFromPoint(p), GA_ROOT);
+    HWND root = windowUnder({at.x(), at.y()});
     if (!root)
         return {};
     wchar_t cls[64] = {};

@@ -26,7 +26,8 @@ QPainterPath arrow()
 }
 } // namespace
 
-ViewerWindow::ViewerWindow(const QRect &nativeMonitor, QSize remoteSize) : m_remoteSize(remoteSize)
+ViewerWindow::ViewerWindow(const QRect &nativeMonitor, int index, QSize remoteSize)
+    : m_monitor(nativeMonitor), m_index(index), m_remoteSize(remoteSize)
 {
     setFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool | Qt::WindowDoesNotAcceptFocus
              | Qt::WindowTransparentForInput);
@@ -38,8 +39,13 @@ ViewerWindow::ViewerWindow(const QRect &nativeMonitor, QSize remoteSize) : m_rem
             screen = s;
     }
     setScreen(screen);
-    setGeometry(screen->geometry());
-    show();
+    if (QGuiApplication::platformName().startsWith(QLatin1String("wayland"))) {
+        // Wayland does not let a client place its window: full screen on the chosen output.
+        showFullScreen();
+    } else {
+        setGeometry(screen->geometry());
+        show();
+    }
 }
 
 void ViewerWindow::applyFrame(const QCborMap &frame)
@@ -69,14 +75,21 @@ void ViewerWindow::applyFrame(const QCborMap &frame)
     }
 }
 
-void ViewerWindow::setRemoteSize(QSize remoteSize)
+void ViewerWindow::setRemote(int index, QSize remoteSize, const df::view::FrameCanvas &canvas)
 {
+    if (index != m_index) {
+        m_index = index;
+        m_canvas = canvas;
+        m_cursor = QPoint(-1, -1); // drawn again when the cursor is reported on this screen
+    }
     m_remoteSize = remoteSize;
     update();
 }
 
 void ViewerWindow::setRemoteCursor(QPoint p)
 {
+    if (p == m_cursor)
+        return;
     const QRect before = cursorRect(m_cursor);
     m_cursor = p;
     update(before);

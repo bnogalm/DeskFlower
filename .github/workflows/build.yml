@@ -25,9 +25,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ninja-build pkg-config libsodium-dev libssl-dev \
-            libx11-dev libxi-dev libxtst-dev libxrandr-dev libei-dev liboeffis-dev \
+            libx11-dev libxi-dev libxtst-dev libxrandr-dev libxfixes-dev libxext-dev libei-dev \
+            libpipewire-0.3-dev \
             libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig1-dev libfreetype-dev \
-            libxcb-cursor0 dpkg-dev file
+            libxcb-cursor0 dpkg-dev file \
+            xvfb xclip dbus
 
       - uses: jurplel/install-qt-action@v4
         with:
@@ -44,7 +46,15 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
           QT_LOGGING_RULES: deskflower.node.debug=true
-        run: ctest --test-dir build --output-on-failure
+          # disposable runner: the cases that touch the desktop or the profile run too (docs/TESTING.md)
+          DESKFLOWER_DESKTOP_TESTS: "1"
+          DESKFLOWER_PRIVATE_SESSION: 1
+        # A private session bus and an X display for the Linux integration tests (tst_portal,
+        # tst_x11), which run only when DESKFLOWER_PRIVATE_SESSION says so; the others stay
+        # offscreen. As in tests/docker/build-and-test.sh.
+        run: >
+          dbus-run-session -- xvfb-run -a -s "-screen 0 1280x800x24"
+          ctest --test-dir build --output-on-failure
 
       - name: Package (DEB)
         run: cd build && cpack
@@ -78,12 +88,40 @@ jobs:
 
       - name: Test
         env:
-          QT_QPA_PLATFORM: offscreen
+          QT_QPA_PLATFORM: offscreen   # tst_macclipboard sets cocoa for itself (the pasteboard)
+          DESKFLOWER_DESKTOP_TESTS: 1  # a throwaway runner: the tests on the real pasteboard run
           QT_LOGGING_RULES: deskflower.node.debug=true
+          # disposable runner: the cases that touch the desktop or the profile run too (docs/TESTING.md)
+          DESKFLOWER_DESKTOP_TESTS: "1"
         # Qt's OpenSSL TLS backend loads libssl at run time (the phone server needs it).
         run: |
           export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix openssl@3)/lib"
           ctest --test-dir build --output-on-failure
+
+      # DeskFlower.app holds every program, Qt, libsodium, libcrypto and libssl, and is signed ad hoc
+      # by the installation itself (cmake/MacBundle.cmake). Checked here as a clean Mac would run it:
+      # nothing may come from Homebrew or the Qt used to build.
+      - name: Check the bundle
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/stage"
+          app="$RUNNER_TEMP/stage/DeskFlower.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          bad=0
+          while IFS= read -r -d '' f; do
+            if file "$f" | grep -q 'Mach-O'; then
+              if otool -L "$f" | tail -n +2 | grep -E '/opt/homebrew|/usr/local/(opt|Cellar)|/Qt/[0-9]'; then
+                echo "::error::$f uses libraries outside the bundle"; bad=1
+              fi
+            fi
+          done < <(find "$app" -type f -print0)
+          test "$bad" = 0
+          # What actually loads (dyld), with Homebrew's OpenSSL out of the way.
+          loaded=$(env -u DYLD_FALLBACK_LIBRARY_PATH DYLD_PRINT_LIBRARIES=1             "$app/Contents/MacOS/deskflower-service" --version 2>&1)
+          echo "$loaded" | grep -E '/opt/homebrew|/Qt/[0-9]' && { echo "::error::the service loads outside libraries"; exit 1; }
+          loaded=$(DYLD_PRINT_LIBRARIES=1 perl -e 'alarm 60; exec @ARGV'             "$app/Contents/Helpers/deskflower-session.app/Contents/MacOS/deskflower-session" --help 2>&1)
+          echo "$loaded" | grep -E '/opt/homebrew|/Qt/[0-9]' && { echo "::error::the helper loads outside libraries"; exit 1; }
+          echo "$loaded" | grep -q 'libqcocoa' || { echo "::error::the helper found no Qt platform plugin"; echo "$loaded"; exit 1; }
+          test -f "$app/Contents/Frameworks/libssl.3.dylib"
 
       - name: Package (DMG)
         run: cd build && cpack

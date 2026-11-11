@@ -1,7 +1,11 @@
+#include "certificate.h"
+#include "httpserver.h"
 #include "phoneserver.h"
+#include "webtestutil.h"
 
 #include <QBuffer>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QImage>
@@ -9,59 +13,54 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
+#include <QNetworkCookie>
+#include <QNetworkCookieJar>
 #include <QNetworkReply>
 #include <QSignalSpy>
 #include <QRegularExpression>
 #include <QTemporaryDir>
+#include <QSslConfiguration>
 #include <QSslSocket>
 #include <QTest>
 #include <QUrlQuery>
+#include <functional>
+#include <memory>
 
 using namespace df::web;
+using df::test::Reply;
+using df::test::pattern;
+using df::test::request;
 
 namespace {
-struct Reply {
-    int status = 0;
-    QByteArray body;
-    QNetworkReply *raw = nullptr;
-    QJsonObject json() const { return QJsonDocument::fromJson(body).object(); }
-};
-
-// Self-signed certificate: the client accepts it, like a phone after the warning.
-Reply request(QNetworkAccessManager &nam, const QByteArray &verb, const QUrl &url, const QByteArray &body = {})
-{
-    QNetworkRequest req(url);
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    QBuffer *buffer = nullptr;
-    if (!body.isNull()) {
-        buffer = new QBuffer;
-        buffer->setData(body);
-        buffer->open(QIODevice::ReadOnly);
-    }
-    QNetworkReply *reply = nam.sendCustomRequest(req, verb, buffer);
-    if (buffer)
-        buffer->setParent(reply);
-    QObject::connect(reply, &QNetworkReply::sslErrors, reply, [reply] { reply->ignoreSslErrors(); });
-    QEventLoop loop;
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-    Reply r{reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(), reply->readAll(), reply};
-    reply->deleteLater();
-    return r;
-}
-
 QByteArray readFile(const QString &path)
 {
     QFile f(path);
     return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
 }
 
-QByteArray pattern(int size)
+// A raw TLS client, for what QNetworkAccessManager hides: pipelining, not reading, idling.
+std::unique_ptr<QSslSocket> rawClient(quint16 port)
 {
-    QByteArray b(size, Qt::Uninitialized);
-    for (int i = 0; i < size; ++i)
-        b[i] = char((i * 7 + i / 977) & 0xFF);
-    return b;
+    auto socket = std::make_unique<QSslSocket>();
+    socket->setPeerVerifyMode(QSslSocket::VerifyNone);
+    QObject::connect(socket.get(), &QSslSocket::sslErrors, socket.get(), [s = socket.get()] { s->ignoreSslErrors(); });
+    socket->connectToHostEncrypted(QStringLiteral("127.0.0.1"), port);
+    return socket;
+}
+
+// Reads from the client until `done` says so or the time is up (the server runs on this thread,
+// so blocking waits are not an option).
+bool readUntil(QSslSocket &socket, QByteArray &into, int timeoutMs, const std::function<bool()> &done)
+{
+    QElapsedTimer t;
+    t.start();
+    while (!done()) {
+        if (t.elapsed() > timeoutMs)
+            return false;
+        QTest::qWait(5);
+        into += socket.readAll();
+    }
+    return true;
 }
 } // namespace
 
@@ -79,6 +78,15 @@ class TestWeb : public QObject
         QUrl u(QStringLiteral("https://127.0.0.1:%1%2").arg(m_server->port()).arg(path));
         u.setQuery(query);
         return u;
+    }
+
+    // The phone's session, as a request line for a raw client.
+    QByteArray cookieHeader() const
+    {
+        QByteArray header = "Cookie: ";
+        for (const QNetworkCookie &c : m_phone.cookieJar()->cookiesForUrl(url("/")))
+            header += c.toRawForm(QNetworkCookie::NameAndValueOnly) + "; ";
+        return header + "\r\n";
     }
 
 private slots:
@@ -328,6 +336,132 @@ private slots:
         QVERIFY(!QFile::exists(m_folder.filePath("big.bin")));
         // The connection is usable again afterwards (a new one if the server closed it).
         QCOMPARE(request(m_phone, "GET", url("/api/info")).status, 200);
+    }
+
+    void pipelinedRequestsAreAnsweredAtTheClientsPace()
+    {
+        // A client that pipelines requests and never reads the answers must not make the
+        // server queue them all: responses are produced as the client takes them (the kernel
+        // slows the sender down), and every request is answered once it does read.
+        TlsIdentity identity;
+        QString error;
+        const QStringList ips{QStringLiteral("127.0.0.1")};
+        const QStringList names{QStringLiteral("localhost")};
+        QVERIFY2(loadOrCreateTlsIdentity(m_config.path(), ips, names, &identity, &error), qPrintable(error));
+        QSslConfiguration tls = QSslConfiguration::defaultConfiguration();
+        tls.setLocalCertificate(identity.certificate);
+        tls.setPrivateKey(identity.key);
+        tls.setPeerVerifyMode(QSslSocket::VerifyNone);
+        int handled = 0;
+        const QByteArray body(64 * 1024, 'b');
+        HttpServer server([&handled, &body](const HttpRequest &) { ++handled; return HttpResponse(200, body); }, 1024);
+        QVERIFY2(server.listen(tls, QHostAddress::LocalHost, 0, &error), qPrintable(error));
+
+        auto client = rawClient(server.port());
+        QTRY_VERIFY(client->isEncrypted());
+        client->setReadBufferSize(1024); // takes nothing
+        const int n = 2000;
+        const QByteArray request = "GET /x HTTP/1.1\r\nHost: x\r\n\r\n";
+        QByteArray requests;
+        for (int i = 0; i < n; ++i)
+            requests += request;
+        client->write(requests);
+        QTest::qWait(2000);
+        QVERIFY2(handled > 0 && handled < n / 4, qPrintable(QString::number(handled)));
+
+        client->setReadBufferSize(0);
+        const QByteArray head = "HTTP/1.1 200 OK\r\nContent-Length: 65536\r\nConnection: keep-alive\r\n\r\n";
+        const qint64 expected = qint64(n) * (head.size() + body.size());
+        qint64 received = 0;
+        QByteArray first;
+        QElapsedTimer t;
+        t.start();
+        while (received < expected && t.elapsed() < 60000) {
+            QTest::qWait(5);
+            const QByteArray chunk = client->readAll();
+            if (first.size() < head.size())
+                first += chunk.left(head.size());
+            received += chunk.size();
+        }
+        QCOMPARE(received, expected);
+        QVERIFY(first.startsWith(head));
+        QCOMPARE(handled, n);
+    }
+
+    void aGrowingFileDoesNotExceedItsAnnouncedLength()
+    {
+        // The phone taps a file still being copied into the folder: the body stops at the
+        // length announced, so the next response on the connection starts where the browser
+        // expects it instead of inside the surplus.
+        const QByteArray part = pattern(8 * 1024 * 1024);
+        QFile f(m_folder.filePath("growing.bin"));
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write(part);
+        f.close();
+
+        auto client = rawClient(m_server->port());
+        QTRY_VERIFY(client->isEncrypted());
+        client->setReadBufferSize(16 * 1024); // a slow phone: the server waits with most of it
+        client->write("GET /api/file?path=growing.bin&dl=1 HTTP/1.1\r\nHost: x\r\n" + cookieHeader() + "\r\n");
+        QTRY_VERIFY(client->bytesAvailable() > 0);
+        QTest::qWait(300);
+        QVERIFY(f.open(QIODevice::Append)); // the copy goes on
+        f.write(part);
+        f.close();
+
+        client->setReadBufferSize(0);
+        QByteArray response;
+        qint64 bodyStart = -1;
+        qint64 length = -1;
+        QVERIFY(readUntil(*client, response, 30000, [&] {
+            if (bodyStart < 0) {
+                const qsizetype headerEnd = response.indexOf("\r\n\r\n");
+                if (headerEnd < 0)
+                    return false;
+                static const QRegularExpression contentLength(QStringLiteral("Content-Length: (\\d+)"));
+                length = contentLength.match(QString::fromLatin1(response.left(headerEnd))).captured(1).toLongLong();
+                bodyStart = headerEnd + 4;
+            }
+            return response.size() >= bodyStart + length;
+        }));
+        QCOMPARE(length, qint64(part.size()));
+        QCOMPARE(response.mid(bodyStart, part.size()), part);
+
+        // The connection is in step: the next request's answer follows at once.
+        client->write("GET /api/info HTTP/1.1\r\nHost: x\r\n" + cookieHeader() + "\r\n");
+        QByteArray next = response.mid(bodyStart + length);
+        QVERIFY(readUntil(*client, next, 5000, [&] { return next.contains("\r\n\r\n"); }));
+        QVERIFY2(next.startsWith("HTTP/1.1 200"), next.left(40).constData());
+        QVERIFY(QFile::remove(f.fileName()));
+    }
+
+    void strangersAreDisconnectedWhenIdle()
+    {
+        // A connection whose requests carry no session is closed after a few idle seconds, so
+        // that strangers cannot hold the slots with cheap requests; a phone's keeps its minute.
+        auto stranger = rawClient(m_server->port());
+        auto phone = rawClient(m_server->port());
+        QTRY_VERIFY(stranger->isEncrypted() && phone->isEncrypted());
+        stranger->write("GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+        phone->write("GET /api/info HTTP/1.1\r\nHost: x\r\n" + cookieHeader() + "\r\n");
+        QByteArray answer;
+        QVERIFY(readUntil(*stranger, answer, 5000, [&] { return answer.contains("\r\n\r\n"); }));
+        QVERIFY2(answer.startsWith("HTTP/1.1 403"), answer.left(40).constData());
+        answer.clear();
+        QVERIFY(readUntil(*phone, answer, 5000, [&] { return answer.contains("\r\n\r\n"); }));
+        QVERIFY2(answer.startsWith("HTTP/1.1 200"), answer.left(40).constData());
+
+        QElapsedTimer t;
+        t.start();
+        QTRY_VERIFY_WITH_TIMEOUT(stranger->state() == QAbstractSocket::UnconnectedState, 9000);
+        QVERIFY2(t.elapsed() >= 3000, qPrintable(QString::number(t.elapsed()))); // not at once: idle
+        QCOMPARE(phone->state(), QAbstractSocket::ConnectedState);
+        QTest::qWait(2000); // well past the stranger's idle time in total
+        QCOMPARE(phone->state(), QAbstractSocket::ConnectedState);
+        phone->write("GET /api/info HTTP/1.1\r\nHost: x\r\n" + cookieHeader() + "\r\n");
+        answer.clear();
+        QVERIFY(readUntil(*phone, answer, 5000, [&] { return answer.contains("\r\n\r\n"); }));
+        QVERIFY2(answer.startsWith("HTTP/1.1 200"), answer.left(40).constData());
     }
 
     void revokingDisconnectsPhones()

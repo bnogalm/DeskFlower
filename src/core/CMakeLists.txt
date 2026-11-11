@@ -1,14 +1,19 @@
 qt_add_library(deskflower_core STATIC
+    agentrequests.h
+    agentwatch.h agentwatch.cpp
     buildinfo.h buildinfo.cpp
     clipboardsync.h clipboardsync.cpp
     clock.h
     filedrag.h filedrag.cpp
     fsutil.h fsutil.cpp
+    transferworker.h transferworker.cpp
     filetransfer.h filetransfer.cpp
     cpace.h cpace.cpp
+    crashreport.h crashreport.cpp
     crypto.h crypto.cpp
     inputcontroller.h inputcontroller.cpp
     ipc.h ipc.cpp
+    keyinjection.h
     keymap.h keymap.cpp
     logging.h logging.cpp
     node.h node.cpp
@@ -16,6 +21,7 @@ qt_add_library(deskflower_core STATIC
     pairing.h pairing.cpp
     reliable.h reliable.cpp
     remoteview.h remoteview.cpp
+    viewtypes.h
     router.h router.cpp
     securestream.h securestream.cpp
     session.h session.cpp
@@ -26,6 +32,10 @@ qt_add_library(deskflower_core STATIC
     workspace.h workspace.cpp
     wire.h
 )
+
+if(DESKFLOWER_KEY_DIAGNOSTICS)
+    target_sources(deskflower_core PRIVATE keydiagnostics.h keydiagnostics.cpp)
+endif()
 
 # Version and update signing key, from the top-level CMakeLists.txt.
 configure_file(buildconfig.h.in ${CMAKE_CURRENT_BINARY_DIR}/buildconfig.h @ONLY)

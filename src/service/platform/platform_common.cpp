@@ -6,6 +6,40 @@
 
 namespace df::platform {
 
+QByteArray launchAgentPlist(const LaunchAgent &agent)
+{
+    const auto string = [](const QString &value) {
+        return QStringLiteral("<string>%1</string>").arg(value.toHtmlEscaped());
+    };
+    QString body;
+    body += QStringLiteral("    <key>Label</key>%1\n").arg(string(agent.label));
+    body += QStringLiteral("    <key>ProgramArguments</key><array>");
+    for (const QString &arg : agent.arguments)
+        body += string(arg);
+    body += QStringLiteral("</array>\n");
+    body += QStringLiteral("    <key>RunAtLoad</key><true/>\n");
+    if (agent.keepAlive)
+        body += QStringLiteral("    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n");
+    // Only in the user's graphical session (not over ssh), with the priority of an application.
+    body += QStringLiteral("    <key>LimitLoadToSessionType</key><string>Aqua</string>\n");
+    body += QStringLiteral("    <key>ProcessType</key><string>Interactive</string>\n");
+    if (!agent.associatedBundle.isEmpty())
+        body += QStringLiteral("    <key>AssociatedBundleIdentifiers</key>%1\n").arg(string(agent.associatedBundle));
+    if (!agent.environment.isEmpty()) {
+        body += QStringLiteral("    <key>EnvironmentVariables</key><dict>");
+        for (const auto &[name, value] : agent.environment)
+            body += QStringLiteral("<key>%1</key>%2").arg(name.toHtmlEscaped(), string(value));
+        body += QStringLiteral("</dict>\n");
+    }
+    if (!agent.logPath.isEmpty())
+        body += QStringLiteral("    <key>StandardErrorPath</key>%1\n").arg(string(agent.logPath));
+    const QString head = QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                                        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+                                        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+                                        "<plist version=\"1.0\">\n<dict>\n");
+    return (head + body + QStringLiteral("</dict>\n</plist>\n")).toUtf8();
+}
+
 namespace {
 #ifdef Q_OS_WIN
 constexpr Qt::CaseSensitivity kCase = Qt::CaseInsensitive;

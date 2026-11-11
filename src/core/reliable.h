@@ -35,7 +35,10 @@ public:
     static constexpr int kMaxMessage = 8 * 1024 * 1024;
     using Sender = std::function<void(const QByteArray &packet)>;
 
-    explicit ReliableChannel(Sender sender);
+    // dataKind/ackKind: the inner kinds its packets carry (wire::Inner), so that a second channel
+    // (the stream tunnels' one, Node) can run beside the control channel on the same session.
+    // (defaults: wire::Inner::Reliable and wire::Inner::Ack).
+    explicit ReliableChannel(Sender sender, quint8 dataKind = 1, quint8 ackKind = 2);
 
     void send(const QByteArray &message, qint64 nowMs);
     // Handles a Reliable or Ack inner packet. Returns fully reassembled messages, in order.
@@ -45,6 +48,8 @@ public:
     void reset();
 
     int unacked() const { return int(m_inFlight.size() + m_queue.size()); }
+    // Payload bytes sent and not yet acknowledged (in flight or queued): back-pressure.
+    qint64 unackedBytes() const { return m_unackedBytes; }
     int rtoMs() const { return m_rto; }
     double congestionWindow() const { return m_cwnd; }
 
@@ -64,6 +69,9 @@ private:
     void onLoss(quint32 seq);
 
     Sender m_sender;
+    quint8 m_dataKind;
+    quint8 m_ackKind;
+    qint64 m_unackedBytes = 0;
 
     // Sending side
     quint32 m_nextSeq = 0;

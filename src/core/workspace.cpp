@@ -11,6 +11,7 @@
 #include <QJsonObject>
 #include <QSaveFile>
 #include <algorithm>
+#include <optional>
 
 namespace df {
 
@@ -32,6 +33,19 @@ QRect bounds(const QList<ScreenInfo> &screens)
 
 QString hex(const QByteArray &b) { return QString::fromLatin1(b.toHex()); }
 QByteArray unhex(const QString &s) { return QByteArray::fromHex(s.toLatin1()); }
+
+// Ids trimmed as ScreenInfo::fromCbor trims them; an oversized plan is dropped altogether.
+std::optional<Workspace::ViewPlan> boundedPlan(const Workspace::ViewPlan &plan)
+{
+    if (plan.size() > Workspace::kMaxViewPlanEntries)
+        return std::nullopt;
+    Workspace::ViewPlan out;
+    for (auto it = plan.constBegin(); it != plan.constEnd(); ++it) {
+        if (!it.key().isEmpty() && !it.value().isEmpty())
+            out.insert(it.key().left(128), it.value().left(128));
+    }
+    return out;
+}
 } // namespace
 
 QCborMap ScreenInfo::toCbor() const
@@ -126,9 +140,19 @@ void Workspace::requestRemoteThumbnails()
     broadcast(msg);
 }
 
+void Workspace::forgetThumbnails()
+{
+    const auto all = m_thumbs;
+    m_thumbs.clear();
+    for (auto device = all.constBegin(); device != all.constEnd(); ++device) {
+        for (auto screen = device->constBegin(); screen != device->constEnd(); ++screen)
+            emit thumbnailChanged(device.key(), screen.key());
+    }
+}
+
 void Workspace::setLayout(const QMap<QByteArray, QPoint> &offsets)
 {
-    m_layout.stamp = Stamp{m_layout.stamp.version + 1, m_node->id()};
+    m_layout.stamp = Stamp{nextLayoutVersion(), m_node->id()};
     m_layout.offsets = offsets; // remote-view flags are kept
     save();
     broadcast(layoutMessage());
@@ -139,7 +163,7 @@ void Workspace::setRemoteView(const QByteArray &deviceId, bool on)
 {
     if (isRemoteView(deviceId) == on)
         return;
-    m_layout.stamp = Stamp{m_layout.stamp.version + 1, m_node->id()};
+    m_layout.stamp = Stamp{nextLayoutVersion(), m_node->id()};
     // Keep the current (possibly default) placement so the device stays where the user sees it.
     if (m_layout.offsets.isEmpty())
         m_layout.offsets = effectiveLayout();
@@ -152,6 +176,25 @@ void Workspace::setRemoteView(const QByteArray &deviceId, bool on)
     emit changed();
 }
 
+void Workspace::setViewPlan(const QByteArray &deviceId, const ViewPlan &plan)
+{
+    // A plan names this device's monitors: it is meaningless for this device itself, and kept
+    // only for devices that stay paired (onPeersChanged drops the others).
+    if (deviceId == m_node->id() || !m_node->isTrusted(deviceId))
+        return;
+    const auto bounded = boundedPlan(plan);
+    if (!bounded)
+        return;
+    if (bounded->isEmpty() ? !m_viewPlans.contains(deviceId) : m_viewPlans.value(deviceId) == *bounded)
+        return;
+    if (bounded->isEmpty())
+        m_viewPlans.remove(deviceId);
+    else
+        m_viewPlans.insert(deviceId, *bounded);
+    save();
+    emit changed();
+}
+
 void Workspace::setSharing(bool share)
 {
     const QByteArray self = m_node->id();
@@ -159,7 +202,7 @@ void Workspace::setSharing(bool share)
         return; // only the master can stop sharing
     if (share && m_master.masterId == self)
         return;
-    m_master.stamp = Stamp{m_master.stamp.version + 1, self};
+    m_master.stamp = Stamp{nextMasterVersion(), self};
     m_master.masterId = share ? self : QByteArray();
     save();
     broadcast(masterMessage());
@@ -332,6 +375,18 @@ void Workspace::onPeersChanged()
     }
     for (auto it = m_thumbDenied.begin(); it != m_thumbDenied.end();)
         it = m_node->isTrusted(*it) ? std::next(it) : m_thumbDenied.erase(it);
+    // Nor where their screens would be shown.
+    bool plansDropped = false;
+    for (auto it = m_viewPlans.begin(); it != m_viewPlans.end();) {
+        if (m_node->isTrusted(it.key())) {
+            ++it;
+        } else {
+            it = m_viewPlans.erase(it);
+            plansDropped = true;
+        }
+    }
+    if (plansDropped)
+        save();
     emit changed();
 }
 
@@ -403,7 +458,40 @@ void Workspace::onMessage(const QByteArray &peerId, const QCborMap &msg)
             m_thumbDenied.insert(peerId);
             emit changed();
         }
-    } else if (type == QLatin1String("layout")) {
+    } else if (type == QLatin1String("layout") || type == QLatin1String("master")) {
+        // A guest neither arranges this workspace nor takes its keyboard and mouse, whether it sent
+        // the message itself or a third device relayed its claim. Its version is remembered, so
+        // that the next local edit outranks it on the devices that did take it (m_layoutFloor).
+        // The guest's own edit (not one it relays) is answered, so that its user learns why.
+        const bool fromGuest = m_node->isGuest(peerId);
+        const bool ownEdit = msg.value(QStringLiteral("a")).toByteArray() == peerId;
+        if (type == QLatin1String("master")
+            && (fromGuest || m_node->isGuest(msg.value(QStringLiteral("m")).toByteArray()))) {
+            m_masterFloor = std::max(m_masterFloor, quint64(msg.value(QStringLiteral("e")).toInteger()));
+            // Only a claim to share its own keyboard and mouse (not letting go of it) is answered.
+            if (fromGuest && ownEdit && msg.value(QStringLiteral("m")).toByteArray() == peerId)
+                replyRefused(peerId, type);
+            return; // a guest may not become the master, through a relay either
+        }
+        if (type == QLatin1String("layout")
+            && (fromGuest || m_node->isGuest(msg.value(QStringLiteral("a")).toByteArray()))) {
+            m_layoutFloor = std::max(m_layoutFloor, quint64(msg.value(QStringLiteral("v")).toInteger()));
+            if (fromGuest && ownEdit)
+                replyRefused(peerId, type);
+            return; // nor rewrite the layout as its author
+        }
+    } else if (type == QLatin1String("ws.refused")) {
+        const QString kind = msg.value(QStringLiteral("k")).toString();
+        if (kind != QLatin1String("layout") && kind != QLatin1String("master"))
+            return;
+        // Only a peer that declared this device a guest has a reason to refuse its edits.
+        if (m_node->declaredTrust(peerId) != TrustLevel::Guest)
+            return;
+        if (throttle(m_refusedHeardAt, QString::fromLatin1(peerId.toHex()) + kind))
+            emit editRefused(peerId, kind, msg.value(QStringLiteral("r")).toString().left(16));
+        return;
+    }
+    if (type == QLatin1String("layout")) {
         LayoutState incoming;
         incoming.stamp = Stamp{quint64(msg.value(QStringLiteral("v")).toInteger()),
                                msg.value(QStringLiteral("a")).toByteArray()};
@@ -433,6 +521,27 @@ void Workspace::onMessage(const QByteArray &peerId, const QCborMap &msg)
             emit changed();
         }
     }
+}
+
+bool Workspace::throttle(QHash<QString, qint64> &noted, const QString &key)
+{
+    const qint64 now = nowMs();
+    auto it = noted.constFind(key);
+    if (it != noted.constEnd() && now - *it < kRefusedReplyMs)
+        return false;
+    noted.insert(key, now);
+    return true;
+}
+
+void Workspace::replyRefused(const QByteArray &peerId, const QString &kind)
+{
+    if (!throttle(m_refusedReplyAt, QString::fromLatin1(peerId.toHex()) + kind))
+        return;
+    QCborMap reply;
+    reply.insert(kT, QStringLiteral("ws.refused"));
+    reply.insert(QStringLiteral("k"), kind);
+    reply.insert(QStringLiteral("r"), QStringLiteral("guest"));
+    m_node->sendMessage(peerId, reply);
 }
 
 // --- Persistence -------------------------------------------------------------------------------
@@ -467,6 +576,18 @@ void Workspace::load()
             list.append(ScreenInfo::fromCbor(QCborMap::fromJsonObject(v.toObject())));
         m_screens.insert(unhex(it.key()), list);
     }
+
+    const QJsonObject plans = root.value(QStringLiteral("viewPlans")).toObject();
+    for (auto it = plans.begin(); it != plans.end(); ++it) {
+        ViewPlan plan;
+        const QJsonObject entries = it->toObject();
+        for (auto e = entries.begin(); e != entries.end(); ++e)
+            plan.insert(e.key(), e->toString());
+        const auto bounded = boundedPlan(plan);
+        const QByteArray device = unhex(it.key());
+        if (bounded && !bounded->isEmpty() && !device.isEmpty())
+            m_viewPlans.insert(device, *bounded);
+    }
 }
 
 void Workspace::save() const
@@ -497,10 +618,20 @@ void Workspace::save() const
         screens.insert(hex(it.key()), list);
     }
 
+    // Local only: a plan names this device's monitors (never part of layoutMessage()).
+    QJsonObject plans;
+    for (auto it = m_viewPlans.constBegin(); it != m_viewPlans.constEnd(); ++it) {
+        QJsonObject entries;
+        for (auto e = it->constBegin(); e != it->constEnd(); ++e)
+            entries.insert(e.key(), e.value());
+        plans.insert(hex(it.key()), entries);
+    }
+
     QJsonObject root;
     root.insert(QStringLiteral("layout"), layout);
     root.insert(QStringLiteral("master"), master);
     root.insert(QStringLiteral("screens"), screens);
+    root.insert(QStringLiteral("viewPlans"), plans);
     QSaveFile f(m_path);
     if (f.open(QIODevice::WriteOnly)) {
         f.write(QJsonDocument(root).toJson());

@@ -8,3 +8,6 @@ dist/
 release-signing-key/
 # Not part of the project
 linkedin-post.txt
+# Ad-hoc build and test output redirected at the repo root
+/*.log
+/*.out

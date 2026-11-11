@@ -1,5 +1,7 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 // Version, license terms and the third-party notices (texts built into the agent).
@@ -14,9 +16,9 @@ Dialog {
     width: Math.min(parent ? parent.width - 48 : 760, 760)
     height: Math.min(parent ? parent.height - 48 : 640, 640)
 
-    readonly property var documents: backend.licenseDocuments()
+    readonly property list<string> documents: root.backend.licenseDocuments()
 
-    function documentLabel(name) {
+    function documentLabel(name: string): string {
         if (name === "LICENSE.md")
             return qsTr("DeskFlower license (PolyForm Noncommercial 1.0.0)")
         if (name === "COMMERCIAL-LICENSE.md")
@@ -26,6 +28,12 @@ Dialog {
         if (name === "licenses/qt-components.md")
             return qsTr("Components inside Qt")
         return qsTr("License text: %1").arg(name.replace(/^licenses\//, "").replace(/\.txt$/, ""))
+    }
+    function documentLabels(names: list<string>): list<string> {
+        const labels = []
+        for (let i = 0; i < names.length; ++i)
+            labels.push(documentLabel(names[i]))
+        return labels
     }
 
     onAboutToShow: documentBox.currentIndex = 0
@@ -90,7 +98,7 @@ Dialog {
         ComboBox {
             id: documentBox
             Layout.fillWidth: true
-            model: root.documents.map(d => root.documentLabel(d))
+            model: root.documentLabels(root.documents)
         }
 
         ScrollView {

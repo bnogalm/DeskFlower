@@ -215,6 +215,211 @@ private slots:
         QTRY_VERIFY(p.wa->masterId().isEmpty());
     }
 
+    void aGuestCannotTakeTheKeyboardOrArrangeTheScreens()
+    {
+        Pair p;
+        QVERIFY(p.start());
+        p.a->setTrust(p.b->id(), TrustLevel::Guest); // B is a guest for A
+        QMap<QByteArray, QPoint> mine{{p.a->id(), {0, 0}}, {p.b->id(), {1920, 0}}};
+        p.wa->setLayout(mine);
+        QTRY_COMPARE(p.wb->layout().offsets, mine); // the guest still learns the layout...
+        p.wb->setLayout({{p.a->id(), {0, 0}}, {p.b->id(), {0, 1080}}});
+        p.wb->setSharing(true);
+        QTest::qWait(300);
+        QCOMPARE(p.wa->layout().offsets, mine); // ...but cannot change it
+        QVERIFY(p.wa->masterId().isEmpty());     // nor take the keyboard and mouse
+    }
+
+    // The guest hears why its edits do not travel: A answers its own layout edit and master claim
+    // with ws.refused (at most once per kind every few seconds), which B reports (editRefused).
+    void aGuestIsToldItsEditsAreRefused()
+    {
+        Pair p;
+        QVERIFY(p.start());
+        QSignalSpy refusedOnB(p.wb.get(), &Workspace::editRefused);
+        QSignalSpy refusedOnA(p.wa.get(), &Workspace::editRefused);
+        p.a->setTrust(p.b->id(), TrustLevel::Guest);
+        p.wb->setLayout({{p.a->id(), {0, 0}}, {p.b->id(), {0, 1080}}});
+        QTRY_COMPARE(refusedOnB.size(), 1);
+        QCOMPARE(refusedOnB.first().at(0).toByteArray(), p.a->id());
+        QCOMPARE(refusedOnB.first().at(1).toString(), QString("layout"));
+        QCOMPARE(refusedOnB.first().at(2).toString(), QString("guest"));
+        p.wb->setLayout({{p.a->id(), {0, 0}}, {p.b->id(), {0, -1080}}});
+        p.wb->setSharing(true);
+        QTRY_COMPARE(refusedOnB.size(), 2);
+        QCOMPARE(refusedOnB.last().at(1).toString(), QString("master"));
+        QTest::qWait(300);
+        QCOMPARE(refusedOnB.size(), 2); // the second layout edit came too soon after the first
+        QCOMPARE(refusedOnA.size(), 0);
+
+        // A's own edits reach B as before, and are not refused.
+        p.wa->setLayout({{p.a->id(), {0, 0}}, {p.b->id(), {1920, 0}}});
+        QTRY_COMPARE(p.wb->layout().offsets.value(p.b->id()), QPoint(1920, 0));
+        QTest::qWait(200);
+        QCOMPARE(refusedOnA.size(), 0);
+    }
+
+    // ws.refused is believed only from a peer that declared this device a guest, and a flood of
+    // them makes one notice per kind per kRefusedReplyMs on the receiving side too.
+    void aRefusalIsBelievedOnlyFromWhereItCanComeFrom()
+    {
+        Pair p;
+        QVERIFY(p.start());
+        QSignalSpy refusedOnA(p.wa.get(), &Workspace::editRefused);
+        QSignalSpy refusedOnB(p.wb.get(), &Workspace::editRefused);
+        QCborMap refusal;
+        refusal.insert(QStringLiteral("t"), QStringLiteral("ws.refused"));
+        refusal.insert(QStringLiteral("k"), QStringLiteral("layout"));
+        refusal.insert(QStringLiteral("r"), QStringLiteral("guest"));
+        // B trusts A: a refusal from B means nothing.
+        for (int i = 0; i < 3; ++i)
+            QVERIFY(p.b->sendMessage(p.a->id(), refusal));
+        // A made B a guest: B believes it, once.
+        p.a->setTrust(p.b->id(), TrustLevel::Guest);
+        QTRY_COMPARE(p.b->declaredTrust(p.a->id()), std::optional<TrustLevel>(TrustLevel::Guest));
+        for (int i = 0; i < 5; ++i)
+            QVERIFY(p.a->sendMessage(p.b->id(), refusal));
+        refusal.insert(QStringLiteral("k"), QStringLiteral("master"));
+        for (int i = 0; i < 5; ++i)
+            QVERIFY(p.a->sendMessage(p.b->id(), refusal));
+        QTRY_COMPARE(refusedOnB.size(), 2);
+        QTest::qWait(300);
+        QCOMPARE(refusedOnB.size(), 2);
+        QCOMPARE(refusedOnB.at(0).at(1).toString(), QString("layout"));
+        QCOMPARE(refusedOnB.at(1).at(1).toString(), QString("master"));
+        QCOMPARE(refusedOnA.size(), 0);
+    }
+
+    // A guest of this device must not become its master (nor rewrite its layout) through a third
+    // device that trusts the guest and relays its claim.
+    void aGuestCannotBecomeMasterThroughAThirdDevice()
+    {
+        QTemporaryDir dirA, dirB, dirC;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        auto c = test::makeNode(dirC.path());
+        Workspace wa(a.get(), dirA.path());
+        Workspace wb(b.get(), dirB.path());
+        Workspace wc(c.get(), dirC.path());
+        // A pairs B as a guest; C pairs B normally; A and C are paired normally.
+        QVERIFY(test::pairNodes(*a, *b, TrustLevel::Guest));
+        QVERIFY(test::pairNodes(*c, *b));
+        QVERIFY(test::pairNodes(*a, *c));
+        QVERIFY(a->isGuest(b->id()));
+
+        wa.setLayout({{a->id(), {0, 0}}, {c->id(), {1920, 0}}});
+        const auto mine = wa.layout().offsets;
+
+        // B shares and arranges the screens: C adopts and relays both to A.
+        wb.setSharing(true);
+        wb.setLayout({{a->id(), {0, 0}}, {b->id(), {-1920, 0}}});
+        QTRY_COMPARE(wc.masterId(), b->id());         // C, which trusts B, does adopt it
+        QTest::qWait(500);                            // let any relay reach A
+        QVERIFY2(wa.masterId().isEmpty(), wa.masterId().toHex());  // but A never accepts a guest master
+        QCOMPARE(wa.layout().offsets, mine);          // nor a layout a guest authored
+    }
+
+    void aLocalEditOutranksTheVersionsAGuestWrote()
+    {
+        // A pairs G as a guest, B in full: B takes G's registers, A drops them. A's next edit must
+        // still win on B (last writer wins is strict on the version), or the two would keep
+        // different layouts and masters for good.
+        QTemporaryDir dirA, dirB, dirG;
+        auto a = test::makeNode(dirA.path());
+        auto b = test::makeNode(dirB.path());
+        auto g = test::makeNode(dirG.path());
+        Workspace wa(a.get(), dirA.path());
+        Workspace wb(b.get(), dirB.path());
+        Workspace wg(g.get(), dirG.path());
+        QVERIFY(test::pairNodes(*a, *g, TrustLevel::Guest));
+        QVERIFY(test::pairNodes(*b, *g));
+        QVERIFY(test::pairNodes(*a, *b));
+
+        // G arranges twice (version 2) and shares, stops and shares again (version 3).
+        wg.setLayout({{g->id(), {0, 0}}, {a->id(), {1920, 0}}});
+        wg.setLayout({{g->id(), {0, 0}}, {a->id(), {-1920, 0}}});
+        wg.setSharing(true);
+        wg.setSharing(false);
+        wg.setSharing(true);
+        QTRY_COMPARE(wb.layout().stamp.author, g->id());
+        QTRY_COMPARE(wb.masterId(), g->id());
+        QTest::qWait(500); // relays reach A
+        QVERIFY(wa.layout().stamp.author.isEmpty());
+        QVERIFY(wa.masterId().isEmpty());
+
+        // A's edits are stamped above what it refused: B adopts them.
+        const QMap<QByteArray, QPoint> mine = {{a->id(), {0, 0}}, {b->id(), {1920, 0}}};
+        wa.setLayout(mine);
+        wa.setSharing(true);
+        QTRY_COMPARE(wb.layout().stamp.author, a->id());
+        QCOMPARE(wb.layout().offsets, mine);
+        QTRY_COMPARE(wb.masterId(), a->id());
+        QCOMPARE(wa.masterId(), a->id());
+    }
+
+    void viewPlansStayLocalAndFollowThePairing()
+    {
+        Pair p;
+        p.wa->setLocalScreens(twoScreens("A"));
+        p.wb->setLocalScreens(twoScreens("B"));
+        QVERIFY(p.start());
+        QTRY_COMPARE(p.wa->screens(p.b->id()).size(), 2);
+        QSignalSpy changed(p.wa.get(), &Workspace::changed);
+        QSignalSpy toB(p.b.get(), &Node::messageReceived);
+        const Workspace::ViewPlan plan = {{"B1", "A2"}, {"B2", Workspace::kHiddenScreen}};
+        // changed() also follows every peersChanged(): only the calls here are counted.
+        qsizetype seen = changed.size();
+        p.wa->setViewPlan(p.b->id(), plan);
+        QCOMPARE(p.wa->viewPlan(p.b->id()), plan);
+        QCOMPARE(changed.size(), seen + 1);
+        seen = changed.size();
+        p.wa->setViewPlan(p.b->id(), plan); // unchanged: nothing to tell
+        QCOMPARE(changed.size(), seen);
+
+        // Nothing of it reaches B (it names A's monitors): not on its own, nor with the layout.
+        p.wa->setLayout({{p.a->id(), {0, 0}}, {p.b->id(), {0, 1080}}});
+        QTRY_COMPARE(p.wb->layout().offsets.value(p.b->id()), QPoint(0, 1080));
+        QVERIFY(!toB.isEmpty());
+        for (const QList<QVariant> &args : toB) {
+            const QCborMap m = args.at(1).value<QCborMap>();
+            QVERIFY(!QCborValue(m).toCbor().contains("viewPlan"));
+            if (m.value(QStringLiteral("t")).toString() != QLatin1String("layout"))
+                continue;
+            for (auto it = m.constBegin(); it != m.constEnd(); ++it)
+                QVERIFY2(QStringList({"t", "v", "a", "p", "rv"}).contains(it.key().toString()), qPrintable(it.key().toString()));
+        }
+        QVERIFY(p.wb->viewPlan(p.a->id()).isEmpty());
+
+        // Not for this device itself, a stranger, or with too many entries; an empty one removes.
+        p.wa->setViewPlan(p.a->id(), plan);
+        QVERIFY(p.wa->viewPlan(p.a->id()).isEmpty());
+        p.wa->setViewPlan("nobody", plan);
+        QVERIFY(p.wa->viewPlan("nobody").isEmpty());
+        Workspace::ViewPlan huge;
+        for (int i = 0; i <= Workspace::kMaxViewPlanEntries; ++i)
+            huge.insert(QStringLiteral("s%1").arg(i), QStringLiteral("A1"));
+        seen = changed.size();
+        p.wa->setViewPlan(p.b->id(), huge);
+        QCOMPARE(p.wa->viewPlan(p.b->id()), plan);
+        QCOMPARE(changed.size(), seen);
+        p.wa->setViewPlan(p.b->id(), {});
+        QVERIFY(p.wa->viewPlan(p.b->id()).isEmpty());
+        QCOMPARE(changed.size(), seen + 1);
+
+        // Persisted: a fresh Workspace reads it back.
+        p.wa->setViewPlan(p.b->id(), plan);
+        {
+            Workspace again(p.a.get(), p.dirA.path());
+            QCOMPARE(again.viewPlan(p.b->id()), plan);
+        }
+
+        // Dropped, also from disk, once B is no longer paired.
+        p.a->unpair(p.b->id());
+        QTRY_VERIFY(p.wa->viewPlan(p.b->id()).isEmpty());
+        Workspace afterwards(p.a.get(), p.dirA.path());
+        QVERIFY(afterwards.viewPlan(p.b->id()).isEmpty());
+    }
+
     void stateIsPersisted()
     {
         QTemporaryDir dirA, dirB;

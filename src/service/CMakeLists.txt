@@ -24,12 +24,17 @@ target_include_directories(deskflower-service PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(deskflower-service PRIVATE deskflower_platform deskflower_core deskflower_web)
 
 # Self-contained installation: cmake --install <build> --prefix <dir> (Qt libraries via windeployqt).
-install(TARGETS deskflower-service
-    BUNDLE DESTINATION .
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-qt_generate_deploy_app_script(
-    TARGET deskflower-service
-    OUTPUT_SCRIPT deploy_script
-    DEPLOY_TOOL_OPTIONS ${DESKFLOWER_DEPLOY_OPTIONS}
-    NO_UNSUPPORTED_PLATFORM_ERROR)
-install(SCRIPT ${deploy_script})
+# macOS: inside DeskFlower.app, next to the agent (deployed with it, cmake/MacBundle.cmake).
+if(APPLE)
+    install(TARGETS deskflower-service RUNTIME DESTINATION DeskFlower.app/Contents/MacOS)
+else()
+    install(TARGETS deskflower-service
+        BUNDLE DESTINATION .
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    qt_generate_deploy_app_script(
+        TARGET deskflower-service
+        OUTPUT_SCRIPT deploy_script
+        DEPLOY_TOOL_OPTIONS ${DESKFLOWER_DEPLOY_OPTIONS}
+        NO_UNSUPPORTED_PLATFORM_ERROR)
+    install(SCRIPT ${deploy_script})
+endif()

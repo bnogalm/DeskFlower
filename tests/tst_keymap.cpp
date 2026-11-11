@@ -3,6 +3,8 @@
 #include <QSet>
 #include <QTest>
 
+#include <set>
+
 using namespace df::keymap;
 
 class TestKeymap : public QObject
@@ -77,6 +79,64 @@ private slots:
         QCOMPARE(evdevFromSet1(set1FromMac(0x7B)), 105); // Left
         QCOMPARE(evdevFromSet1(set1FromMac(0x3D)), 100); // Right Option -> Right Alt
         QCOMPARE(macFromSet1(set1FromEvdev(125)), 0x37); // Meta -> Command
+    }
+
+    // Paste chords (paste evidence): Ctrl+V, Shift+Insert, Ctrl+Shift+V, either hand's modifiers;
+    // Command (the Windows key's codes) only where Command pastes; V or Insert alone never;
+    // Shift with the keypad's Ins off a Mac.
+    void pasteChords()
+    {
+        const quint32 lCtrl = 0x1D, rCtrl = 0xE01D, lShift = 0x2A, rShift = 0x36, lWin = 0xE05B, rWin = 0xE05C;
+        const quint32 v = 0x2F, insert = 0xE052, keypadInsert = 0x52, a = 0x1E, alt = 0x38;
+        for (const bool mac : {false, true}) {
+            QVERIFY(isPasteChord(QSet<quint32>{lCtrl}, v, mac));
+            QVERIFY(isPasteChord(QSet<quint32>{rCtrl}, v, mac)); // right-hand Control
+            QVERIFY(isPasteChord(QSet<quint32>{lShift}, insert, mac));
+            QVERIFY(isPasteChord(QSet<quint32>{rShift}, insert, mac)); // right-hand Shift
+            QVERIFY(isPasteChord(QSet<quint32>{lCtrl, lShift}, v, mac));
+            QVERIFY(isPasteChord(QSet<quint32>{rCtrl, rShift}, v, mac));
+            QVERIFY(!isPasteChord(QSet<quint32>{}, v, mac));      // V alone
+            QVERIFY(!isPasteChord(QSet<quint32>{}, insert, mac)); // Insert alone
+            QVERIFY(!isPasteChord(QSet<quint32>{lShift}, v, mac)); // a capital V
+            QVERIFY(!isPasteChord(QSet<quint32>{alt}, v, mac));
+            QVERIFY(!isPasteChord(QSet<quint32>{lCtrl}, a, mac));
+            QVERIFY(!isPasteChord(QSet<quint32>{lCtrl}, lCtrl, mac)); // Control's own press
+            // Win+V opens the clipboard history on Windows; Command+V pastes on a Mac.
+            QCOMPARE(isPasteChord(QSet<quint32>{lWin}, v, mac), mac);
+            QCOMPARE(isPasteChord(QSet<quint32>{rWin}, v, mac), mac);
+            QVERIFY(!isPasteChord(QSet<quint32>{lWin}, a, mac));
+            // Shift with the keypad's 0 (Ins with Num Lock off) pastes, except on a Mac.
+            QCOMPARE(isPasteChord(QSet<quint32>{lShift}, keypadInsert, mac), !mac);
+            QCOMPARE(isPasteChord(QSet<quint32>{rShift}, keypadInsert, mac), !mac);
+            QVERIFY(!isPasteChord(QSet<quint32>{}, keypadInsert, mac)); // keypad 0 alone
+        }
+        // The backends' std::set works the same.
+        QVERIFY(isPasteChord(std::set<quint32>{lCtrl}, v, false));
+        QVERIFY(!isPasteChord(std::set<quint32>{}, v, false));
+    }
+
+    // Gesture keys: Enter (main and keypad, whatever is held), the Apps key, Shift+F10 (either
+    // Shift); F10 alone, letters and modifiers are not.
+    void pasteGestureKeys()
+    {
+        const quint32 lShift = 0x2A, rShift = 0x36, lCtrl = 0x1D, f10 = 0x44;
+        QVERIFY(isPasteGestureKey(QSet<quint32>{}, 0x1C));       // Enter
+        QVERIFY(isPasteGestureKey(QSet<quint32>{}, 0xE01C));     // keypad Enter
+        QVERIFY(isPasteGestureKey(QSet<quint32>{lCtrl}, 0x1C));  // Ctrl+Enter
+        QVERIFY(isPasteGestureKey(QSet<quint32>{}, 0xE05D));     // Apps (context menu)
+        QVERIFY(isPasteGestureKey(QSet<quint32>{lShift}, f10));  // Shift+F10
+        QVERIFY(isPasteGestureKey(QSet<quint32>{rShift}, f10));
+        QVERIFY(!isPasteGestureKey(QSet<quint32>{}, f10));       // F10 alone (the menu bar)
+        QVERIFY(!isPasteGestureKey(QSet<quint32>{lCtrl}, f10));
+        QVERIFY(!isPasteGestureKey(QSet<quint32>{}, 0x2F));      // V
+        QVERIFY(!isPasteGestureKey(QSet<quint32>{}, 0x1E));      // A
+        QVERIFY(!isPasteGestureKey(QSet<quint32>{}, lShift));    // a modifier alone
+        QVERIFY(!isPasteGestureKey(QSet<quint32>{}, 0xE05B));    // the Windows key
+        QVERIFY(isPasteGestureKey(std::set<quint32>{lShift}, f10));
+        // Either kind is evidence.
+        QVERIFY(isPasteEvidenceKey(QSet<quint32>{lCtrl}, 0x2F, false));
+        QVERIFY(isPasteEvidenceKey(QSet<quint32>{}, 0x1C, false));
+        QVERIFY(!isPasteEvidenceKey(QSet<quint32>{}, 0x2F, true));
     }
 };
 

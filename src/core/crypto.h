@@ -36,6 +36,15 @@ QByteArray aeadEncrypt(const QByteArray &key, quint64 nonce, const QByteArray &a
 std::optional<QByteArray> aeadDecrypt(const QByteArray &key, quint64 nonce, const QByteArray &ad,
                                       const QByteArray &ciphertext);
 
+// Sealing content under a one-off key (the shared clipboard): XChaCha20-Poly1305 with a random
+// 24-byte nonce prepended to the ciphertext, so a fresh key needs no nonce bookkeeping. `ad` binds
+// the context (e.g. clipboard id || mime), so a ciphertext cannot be passed off as another one.
+constexpr int kSealNonceSize = 24;
+constexpr int kSealOverhead = kSealNonceSize + kTagSize;
+QByteArray sealKey(); // kKeySize random bytes
+QByteArray seal(const QByteArray &key, const QByteArray &ad, const QByteArray &plaintext);
+std::optional<QByteArray> unseal(const QByteArray &key, const QByteArray &ad, const QByteArray &sealed);
+
 // Stable device identifier derived from the long-term public key.
 QByteArray deviceIdFromPublicKey(const QByteArray &publicKey);
 // Human-readable fingerprint ("AB12-CD34-...") for display.

@@ -1,5 +1,7 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 // Shown on the device whose screen a paired master wants to view. No answer counts as Deny.
@@ -12,7 +14,7 @@ Dialog {
 
     signal answered(string decision)  // "once", "always" or "deny"
 
-    function show(id, name, timeoutMs) {
+    function show(id: string, name: string, timeoutMs: int): void {
         peerId = id
         peerName = name
         remaining = Math.max(1, Math.ceil(timeoutMs / 1000))

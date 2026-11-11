@@ -12,12 +12,37 @@
 #include <QByteArray>
 #include <QCborMap>
 #include <QHostAddress>
+#include <QString>
+#include <QVersionNumber>
 #include <QtEndian>
 #include <optional>
 
 namespace df::wire {
 
 constexpr quint8 kVersion = 1;
+
+// The protocol of the features that change incompatibly between versions (today: bulk file
+// transfers, FileTransfer). Every device advertises it in its authenticated hello ("pv"); two
+// devices whose protocols differ do not use those features with each other (the transfer is
+// refused with a clear error, never misread) and the user is told to update the older one.
+// Discovery, pairing, the hello itself and signed updates (Updater) never depend on it: an older
+// device is still found, paired, warned and updated.
+// History:
+//   1  before 0.1.22: one manifest frame, no folder items.
+//   2  0.1.22-0.1.30: folder items, split manifests, kChunk bytes of one item per data frame
+//      (kind 2). Never advertised: implied by a version from 0.1.22 on.
+//   3  0.1.31: the first one advertised. Data frames of kind 3 packed full across items, every
+//      manifest frame and get carrying "pv".
+// Bump it on any incompatible FileTransfer wire change.
+inline constexpr int kProtocolVersion = 3;
+
+// The protocol of a peer that advertises none, from the version its hello declares: 2 from
+// 0.1.22 on, 1 before (or unknown).
+inline int impliedProtocol(const QString &version)
+{
+    const QVersionNumber v = QVersionNumber::fromString(version);
+    return !v.isNull() && v >= QVersionNumber(0, 1, 20) ? 2 : 1;
+}
 constexpr quint16 kDiscoveryPort = 24800;
 constexpr quint16 kDefaultDataPort = 24801;
 constexpr int kMaxPacket = 1400;
@@ -43,6 +68,12 @@ enum class Inner : quint8 {
     Reliable = 1,
     Ack = 2,
     Datagram = 3,
+    // The stream tunnels' reliable channel (Node: a SecureStream through the UDP session when no
+    // TCP connection gets through), apart from the control channel so that a bulk transfer never
+    // delays input or clipboard messages. Only sent to peers whose hello announces tunnels;
+    // earlier versions ignore inner kinds they do not know.
+    TunnelData = 4,
+    TunnelAck = 5,
 };
 
 constexpr int kHeaderSize = 2;

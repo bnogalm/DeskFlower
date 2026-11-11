@@ -15,13 +15,17 @@ constexpr int kMinRto = 30;
 constexpr int kMaxRto = 1000;
 } // namespace
 
-ReliableChannel::ReliableChannel(Sender sender) : m_sender(std::move(sender)) {}
+ReliableChannel::ReliableChannel(Sender sender, quint8 dataKind, quint8 ackKind)
+    : m_sender(std::move(sender)), m_dataKind(dataKind), m_ackKind(ackKind)
+{
+}
 
 void ReliableChannel::reset()
 {
     m_nextSeq = 0;
     m_queue.clear();
     m_inFlight.clear();
+    m_unackedBytes = 0;
     m_srtt = -1;
     m_rto = 200;
     m_cwnd = kInitialCwnd;
@@ -41,10 +45,11 @@ void ReliableChannel::send(const QByteArray &message, qint64 nowMs)
         offset += fragment.size();
         QByteArray packet;
         packet.reserve(fragment.size() + 6);
-        packet.append(char(wire::Inner::Reliable));
+        packet.append(char(m_dataKind));
         wire::appendU32(packet, m_nextSeq++);
         packet.append(char(offset < message.size() ? kMoreFragments : 0));
         packet.append(fragment);
+        m_unackedBytes += packet.size();
         m_queue.push_back(packet);
     } while (offset < message.size());
     flush(nowMs);
@@ -108,6 +113,7 @@ void ReliableChannel::handleAck(quint32 next, quint32 sack, qint64 nowMs)
         }
         if (acked) {
             ackSample(it->second, nowMs);
+            m_unackedBytes -= it->second.packet.size();
             // Slow start below the threshold, then about one packet per window.
             m_cwnd = std::min<double>(kMaxCwnd, m_cwnd + (m_cwnd < m_ssthresh ? 1.0 : 1.0 / m_cwnd));
             it = m_inFlight.erase(it);
@@ -147,7 +153,7 @@ void ReliableChannel::sendAck()
             sack |= 1u << bit;
     }
     QByteArray ack;
-    ack.append(char(wire::Inner::Ack));
+    ack.append(char(m_ackKind));
     wire::appendU32(ack, m_expected);
     wire::appendU32(ack, sack);
     m_sender(ack);
@@ -159,13 +165,13 @@ QList<QByteArray> ReliableChannel::receive(const QByteArray &packet, qint64 nowM
     if (packet.isEmpty())
         return delivered;
 
-    const auto kind = wire::Inner(quint8(packet[0]));
-    if (kind == wire::Inner::Ack) {
+    const quint8 kind = quint8(packet[0]);
+    if (kind == m_ackKind) {
         if (packet.size() >= 9)
             handleAck(wire::readU32(packet, 1), wire::readU32(packet, 5), nowMs);
         return delivered;
     }
-    if (kind != wire::Inner::Reliable || packet.size() < 6)
+    if (kind != m_dataKind || packet.size() < 6)
         return delivered;
 
     const quint32 seq = wire::readU32(packet, 1);
