@@ -50,12 +50,14 @@ bool Identity::loadOrCreate(const QString &configDir, QString *error)
     if (secret.size() == crypto::kKeySize) {
         m_keys.secretKey = secret;
         m_keys.publicKey = crypto::publicKeyFromSecret(secret);
-        m_name = obj.value(QStringLiteral("name")).toString();
+        m_name = obj.value(QStringLiteral("name")).toString().trimmed().left(64);
     } else {
         m_keys = crypto::generateKeyPair();
     }
+    // Capped as peers cap it (and as setName does): a long host name would otherwise be shown
+    // whole here and cut on every other device.
     if (m_name.isEmpty())
-        m_name = QSysInfo::machineHostName();
+        m_name = QSysInfo::machineHostName().trimmed().left(64);
     m_id = crypto::deviceIdFromPublicKey(m_keys.publicKey);
     if (!save()) {
         if (error)
