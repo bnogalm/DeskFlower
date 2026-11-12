@@ -228,7 +228,7 @@ private slots:
                                                                     QHostAddress::LocalHost, listener.serverPort()));
             QSignalSpy established(s.get(), &SecureStream::established);
             QSignalSpy closed(s.get(), &SecureStream::closed);
-            (void)QTest::qWaitFor([&] { return established.size() || closed.size(); }, 12000);
+            (void)test::waitFor([&] { return established.size() || closed.size(); }, 12000);
             return established.size() == 1;
         };
 
@@ -475,7 +475,7 @@ private slots:
                 result = r;
                 done = true;
             });
-            (void)QTest::qWaitFor([&] { return done; }, 15000);
+            (void)test::waitFor([&] { return done; }, 15000);
             return result;
         };
 
@@ -872,7 +872,7 @@ private slots:
             });
             connect(s.get(), &SecureStream::received, s.get(), [&](const QByteArray &f) { frames.append(f); });
             connect(s.get(), &SecureStream::closed, s.get(), [&] { closed = true; });
-            (void)QTest::qWaitFor([&] { return closed; }, 10000);
+            (void)test::waitFor([&] { return closed; }, 10000);
             return frames;
         };
         const QString older = QStringLiteral("%1 uses a newer transfer protocol (version %2). The protocol has changed: "
@@ -1185,8 +1185,8 @@ private slots:
                 result = r;
                 done = true;
             });
-            (void)QTest::qWaitFor([&] { return done; }, 15000);
-            (void)QTest::qWaitFor([&] { return !fb.isActiveTarget(dest); }, 15000);
+            (void)test::waitFor([&] { return done; }, 15000);
+            (void)test::waitFor([&] { return !fb.isActiveTarget(dest); }, 15000);
             return result;
         };
 
@@ -1744,7 +1744,7 @@ private slots:
                 result = r;
                 done = true;
             });
-            (void)QTest::qWaitFor([&] { return done; }, 60000);
+            (void)test::waitFor([&] { return done; }, 60000);
             return result.ok;
         };
         writeFile(source.filePath("small.txt"), QByteArray(100, 's'));
@@ -2008,7 +2008,7 @@ private slots:
                 result = r;
                 done = true;
             });
-            (void)QTest::qWaitFor([&] { return done; }, 15000);
+            (void)test::waitFor([&] { return done; }, 15000);
             return result;
         };
 
@@ -2294,7 +2294,7 @@ private slots:
             });
             if (calls != 0)
                 return false; // never inside the call
-            if (!QTest::qWaitFor([&] { return calls > 0; }, 15000))
+            if (!test::waitFor([&] { return calls > 0; }, 15000))
                 return false;
             QTest::qWait(600); // past the idle timeout: no second report
             return calls == 1;
@@ -2737,7 +2737,7 @@ private slots:
                     result = r;
                     done = true;
                 });
-                (void)QTest::qWaitFor([&] { return done; }, 60000);
+                (void)test::waitFor([&] { return done; }, 60000);
                 return result;
             };
             // Grown after listing: its first 1000 bytes are sent.

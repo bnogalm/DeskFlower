@@ -3,16 +3,37 @@
 #include "node.h"
 
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QSignalSpy>
 #include <QTest>
+#include <QTimer>
 #include <functional>
 #include <memory>
 #include <optional>
 
 namespace df::test {
+
+// Runs a real event loop until `done` holds or `timeoutMs` passes (true if it held). Unlike
+// QTest::qWaitFor, which sleeps 10 ms between rounds of events (more on macOS), it does not cap a
+// transfer at one round trip per sleep: a stream moving 64 KB frames ran at about 6 MB/s there.
+inline bool waitFor(const std::function<bool()> &done, int timeoutMs)
+{
+    if (done())
+        return true;
+    QEventLoop loop;
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
+        if (done())
+            loop.quit();
+    });
+    poll.start(1);
+    QTimer::singleShot(timeoutMs, &loop, &QEventLoop::quit);
+    loop.exec();
+    return done();
+}
 
 // A directory junction (Windows; no rights needed), as a user could plant one; a symbolic link
 // elsewhere.
