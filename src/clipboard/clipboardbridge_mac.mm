@@ -41,8 +41,15 @@ struct SealedState {
     // reads them one after another) give up at once instead of asking (and waiting) again each.
     static constexpr int kSamePasteMs = 1500;
 
+    // A short wait after a read that was no paste or a refused format (the real paste may follow
+    // at once); after a failed or refused transfer, once the other items of that paste gave up.
+    static constexpr int kRepublishSoonMs = 300;
+    static constexpr int kRepublishAfterPasteMs = kSamePasteMs + 100;
+
     ClipboardBridge::UnsealFormat unseal;
     ClipboardBridge::FetchFiles fetch;
+    std::function<void(int delayMs)> unprovided;
+    bool lastWasNoPaste = false; // the last failed ensureFetched was a read that was no paste
     QStringList names;   // top-level files and folders, one pasteboard item each
     QStringList fetched; // their local paths, once transferred (kept: Finder reads item by item)
     QDeadlineTimer failedRecently{QDeadlineTimer::Forever};
@@ -58,6 +65,7 @@ struct SealedState {
             return true;
         if (failed && !failedRecently.hasExpired())
             return false;
+        lastWasNoPaste = false;
         QString error;
         fetched = fetch ? fetch(&error) : QStringList();
         if (!fetched.isEmpty())
@@ -65,6 +73,7 @@ struct SealedState {
         if (error == QLatin1String(ClipboardBridge::kNotAPaste)) {
             qCInfo(lcClipBridge) << "Copied files not transferred: not a paste";
             failed = false;
+            lastWasNoPaste = true;
             return false;
         }
         qCWarning(lcClipBridge) << "Paste failed:" << error;
@@ -72,6 +81,14 @@ struct SealedState {
         failedRecently.setRemainingTime(kSamePasteMs); // from the end of the attempt
         return false;
     }
+
+    // Nothing was provided for a type: the items are written again a moment later (see the header).
+    void nothingProvided(int delayMs) const
+    {
+        if (unprovided)
+            unprovided(delayMs);
+    }
+    int filesRetryMs() const { return lastWasNoPaste ? kRepublishSoonMs : kRepublishAfterPasteMs; }
 
     // The local path of item `index`; empty if the transfer was refused or failed.
     QString pathOf(int index)
@@ -142,8 +159,10 @@ QString mimeOf(NSPasteboardType type)
     (void)keepAlive;
     const std::shared_ptr<SealedState> state = _state;
     if ([type isEqualToString:kFilenamesType]) {
-        if (!state->ensureFetched())
+        if (!state->ensureFetched()) {
+            state->nothingProvided(state->filesRetryMs());
             return;
+        }
         NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:NSUInteger(state->fetched.size())];
         for (const QString &path : std::as_const(state->fetched))
             [paths addObject:path.toNSString()];
@@ -152,8 +171,10 @@ QString mimeOf(NSPasteboardType type)
     }
     if ([type isEqualToString:NSPasteboardTypeFileURL]) {
         const QString path = state->pathOf(_index);
-        if (path.isEmpty())
-            return; // refused or failed: nothing provided, a later read asks again
+        if (path.isEmpty()) {
+            state->nothingProvided(state->filesRetryMs()); // refused or failed: fresh items next time
+            return;
+        }
         NSURL *url = [NSURL fileURLWithPath:path.toNSString() isDirectory:QFileInfo(path).isDir()];
         [item setString:[url absoluteString] forType:NSPasteboardTypeFileURL];
         return;
@@ -163,8 +184,10 @@ QString mimeOf(NSPasteboardType type)
         return;
     QString error;
     const QByteArray plain = state->unseal(mime, &error);
-    if (plain.isEmpty())
-        return; // refused: not provided, the next request asks again
+    if (plain.isEmpty()) {
+        state->nothingProvided(SealedState::kRepublishSoonMs); // refused: fresh items next time
+        return;
+    }
     [item setData:plain.toNSData() forType:type];
 }
 
@@ -173,31 +196,24 @@ QString mimeOf(NSPasteboardType type)
 namespace {
 // The providers of the items on the pasteboard now, kept alive here (whatever the items do).
 NSArray<DFSealedItemProvider *> *s_providers = nil;
-} // namespace
 
-namespace df::macclipboard {
+// What the last setSealed wrote, for republish.
+struct Published {
+    std::shared_ptr<SealedState> state;
+    QList<ClipboardBridge::SealedFormat> formats;
+    QStringList names;
+    int pendingFiles = 0;
+};
+Published s_published;
 
-qint64 changeCount()
-{
-    return qint64([[NSPasteboard generalPasteboard] changeCount]);
-}
-
-bool rendering()
-{
-    return s_rendering > 0;
-}
-
-qint64 setSealed(const QList<ClipboardBridge::SealedFormat> &formats, const QStringList &names, int pendingFiles,
-                 ClipboardBridge::UnsealFormat unseal, ClipboardBridge::FetchFiles fetch)
+qint64 writeSealed(const Published &published)
 {
     @autoreleasepool {
-        auto state = std::make_shared<SealedState>();
-        state->unseal = std::move(unseal);
-        state->fetch = std::move(fetch);
-        state->names = names;
-
+        const std::shared_ptr<SealedState> &state = published.state;
+        const QStringList &names = published.names;
+        const int pendingFiles = published.pendingFiles;
         NSMutableArray<NSPasteboardType> *formatTypes = [NSMutableArray array];
-        for (const ClipboardBridge::SealedFormat &f : formats) {
+        for (const ClipboardBridge::SealedFormat &f : published.formats) {
             if (NSPasteboardType type = pasteboardType(f.mime))
                 [formatTypes addObject:type];
         }
@@ -239,6 +255,40 @@ qint64 setSealed(const QList<ClipboardBridge::SealedFormat> &formats, const QStr
         s_providers = providers;
         return qint64([pasteboard changeCount]);
     }
+}
+
+} // namespace
+
+namespace df::macclipboard {
+
+qint64 changeCount()
+{
+    return qint64([[NSPasteboard generalPasteboard] changeCount]);
+}
+
+bool rendering()
+{
+    return s_rendering > 0;
+}
+
+qint64 setSealed(const QList<ClipboardBridge::SealedFormat> &formats, const QStringList &names, int pendingFiles,
+                 ClipboardBridge::UnsealFormat unseal, ClipboardBridge::FetchFiles fetch,
+                 std::function<void(int delayMs)> unprovided)
+{
+    auto state = std::make_shared<SealedState>();
+    state->unseal = std::move(unseal);
+    state->fetch = std::move(fetch);
+    state->unprovided = std::move(unprovided);
+    state->names = names;
+    s_published = Published{state, formats, names, pendingFiles};
+    return writeSealed(s_published);
+}
+
+qint64 republish()
+{
+    if (!s_published.state)
+        return -1;
+    return writeSealed(s_published);
 }
 
 } // namespace df::macclipboard

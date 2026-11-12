@@ -197,5 +197,10 @@ private:
     QTimer m_pasteboardPoll;
     qint64 m_lastChangeCount = -1;
     qint64 m_ownChangeCount = -1; // the change of our last write (its echo is ignored)
+    // Sealed items that gave nothing for a type are written again (macclipboard::republish), once
+    // per burst; m_sealedSerial tells a republish meant for an older sealed clipboard.
+    quint64 m_sealedSerial = 0;
+    bool m_republishPending = false;
+    void republishSealed(quint64 serial);
 #endif
 };

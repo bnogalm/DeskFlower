@@ -1012,7 +1012,13 @@ shared mouse brings it, and reads it only when the user pastes on it with the ke
     of the same paste give up at once (for 1.5 s), so one paste asks once. Without the full list (a
     guest gets none; more than 2,000 entries) a single item offers every path in the legacy
     `NSFilenamesPboardType` (and the first as its file URL); once transferred, the files replace it
-    as one file URL each. A replacement of the pasteboard waits while an item is being provided
+    as one file URL each. macOS 15 builds even that legacy list from the items' file URLs, so the
+    helper lists such a copy on demand (`clipList`: names and sizes only, no paste needed) and
+    writes the items again, one per top-level file or folder, unless a paste already started. An
+    item that gave nothing for a type (a refused or failed paste, a read that was no paste) is not
+    asked for it again by the pasteboard: the same items are written again (0.3 s later, or 1.6 s
+    after a refused or failed transfer, once the other items of that paste gave up), so the next
+    paste asks. A replacement of the pasteboard waits while an item is being provided
     (the pasteboard server is waiting for that data). Qt's own pasteboard code is not used for
     this, because it reads every URL as soon as the data is set.
   - Transferred files are stored in `<received folder>/Clipboard/<stamp>-<n>/` (`n` counts the

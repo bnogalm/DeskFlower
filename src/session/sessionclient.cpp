@@ -16,6 +16,8 @@
 #include <QtEndian>
 
 #include <algorithm>
+#include <functional>
+#include <memory>
 #include <utility>
 #include <QCoreApplication>
 #include <QGuiApplication>
@@ -85,6 +87,9 @@ public:
     }
 
     bool finished() const { return m_finished; }
+    // For an answer in several messages ({more: true} on all but the last, as clipListed): each
+    // but the last goes to `part`, the last to `done`.
+    void setPartial(std::function<void(const QCborMap &part)> part) { m_partial = std::move(part); }
 
 private:
     void send(const QString &serverName)
@@ -106,6 +111,10 @@ private:
             m_buffer.remove(0, int(size) + 4);
             if (m.value(QStringLiteral("ev")).toString() != m_replyEvent)
                 continue; // state, thumbnails...: what every new connection gets
+            if (m_partial && m.value(QStringLiteral("ok")).toBool() && m.value(QStringLiteral("more")).toBool()) {
+                m_partial(m);
+                continue;
+            }
             finish(m, m.value(QStringLiteral("ok")).toBool() ? QString() : m.value(QStringLiteral("error")).toString());
         }
     }
@@ -126,6 +135,7 @@ private:
     QString m_fallback;
     QString m_replyEvent;
     Done m_done;
+    std::function<void(const QCborMap &part)> m_partial;
     QByteArray m_frame;
     QByteArray m_buffer;
     bool m_connected = false;
@@ -446,8 +456,42 @@ void SessionClient::onMessage(const QCborMap &msg)
             auto fetch = [this, files, generation, kid, pending](QString *error) {
                 return files.isEmpty() ? pastedFiles(generation, kid, pending, error) : files;
             };
+            const bool gated = msg.value(QStringLiteral("gated")).toBool();
             m_clipboard.applySealed(formats, listed, files.isEmpty() ? pending : int(files.size()), unseal, fetch,
-                                    msg.value(QStringLiteral("gated")).toBool());
+                                    gated);
+#ifdef Q_OS_MACOS
+            // Not listed in the announcement (a long copy): one pasteboard item for them all, of
+            // which Finder pastes only the first (macOS builds even the legacy list of paths from
+            // the items). Listed now (names and sizes only: no paste needed, no contents move), the
+            // items are written again one per top-level file or folder, unless a paste already
+            // started with the single item.
+            if (listed.isEmpty() && files.isEmpty() && pending > 0 && !kid.isEmpty()) {
+                auto items = std::make_shared<QList<ClipboardBridge::ListedFile>>();
+                auto take = [items](const QCborMap &m) {
+                    for (const QCborValue &v : m.value(QStringLiteral("items")).toArray())
+                        items->append(ClipboardBridge::listedFromCbor(v.toArray()));
+                };
+                QCborMap args;
+                args.insert(QStringLiteral("kid"), QString::fromLatin1(kid.toHex()));
+                auto *request = new ServiceRequest(
+                    m_renderServerName, m_serverName, QStringLiteral("clipList"), args, QStringLiteral("clipListed"),
+                    [this, generation, items, take, formats, pending, unseal, fetch, gated](const QCborMap &reply,
+                                                                                         const QString &failure) {
+                        if (m_clipGeneration != generation)
+                            return; // copied again since
+                        if (!failure.isEmpty() || !reply.value(QStringLiteral("ok")).toBool()) {
+                            qCInfo(lcSession) << "Copied files not listed:" << failure;
+                            return;
+                        }
+                        take(reply);
+                        if (m_paste.generation == generation && (m_paste.request || m_paste.done))
+                            return; // a paste of the single item is under way or done
+                        m_clipboard.applySealed(formats, *items, pending, unseal, fetch, gated);
+                    },
+                    this);
+                request->setPartial(take);
+            }
+#endif
         } else {
             m_clipboard.apply(msg.value(QStringLiteral("f")).toMap(), files);
         }

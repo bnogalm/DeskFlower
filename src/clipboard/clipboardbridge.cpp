@@ -16,7 +16,9 @@
 #include <QImage>
 #include <QLoggingCategory>
 #include <QMimeData>
+#include <QPointer>
 #include <QRegularExpression>
+#include <QTimer>
 #include <QUrl>
 
 #include <algorithm>
@@ -353,8 +355,22 @@ void ClipboardBridge::applySealed(const QList<SealedFormat> &formats, const QLis
             return fetched;
         };
     }
-    m_ownChangeCount =
-        df::macclipboard::setSealed(formats, names, pendingFiles, std::move(unseal), std::move(fetchFiles));
+    // An item asked for a type that got nothing (a refused or failed paste, a read that was no
+    // paste) is not asked again by the pasteboard: the items are written again a moment later, so
+    // that the next paste asks (and the files of a refused paste can still be pasted).
+    const quint64 serial = ++m_sealedSerial;
+    m_republishPending = false;
+    auto unprovided = [bridge = QPointer<ClipboardBridge>(this), serial](int delayMs) {
+        if (!bridge || bridge->m_republishPending || bridge->m_sealedSerial != serial)
+            return;
+        bridge->m_republishPending = true;
+        QTimer::singleShot(delayMs, bridge, [bridge, serial] {
+            if (bridge)
+                bridge->republishSealed(serial);
+        });
+    };
+    m_ownChangeCount = df::macclipboard::setSealed(formats, names, pendingFiles, std::move(unseal),
+                                                   std::move(fetchFiles), std::move(unprovided));
     m_lastChangeCount = m_ownChangeCount;
     qCInfo(lcClipBridge) << "Clipboard set:" << formats.size() << "sealed formats," << names.size()
                          << "items, rendered on paste";
@@ -404,6 +420,7 @@ void ClipboardBridge::clearOwned()
         m_backend->setMimeData(new QMimeData);
         m_ownChangeCount = df::macclipboard::changeCount(); // not reported back (the poll skips it)
         m_lastChangeCount = m_ownChangeCount;
+        ++m_sealedSerial; // a pending republish of the sealed items is void
     }
 #else
     if (renderInProgress()) {
@@ -442,6 +459,28 @@ bool ClipboardBridge::deferWhileRendering(std::function<void()> retry)
     return false;
 #endif
 }
+
+#ifdef Q_OS_MACOS
+void ClipboardBridge::republishSealed(quint64 serial)
+{
+    m_republishPending = false;
+    // Only the sealed items still on the pasteboard (nothing copied since, not replaced by the
+    // transferred files), and not under a render (the pasteboard server waits for that data).
+    if (serial != m_sealedSerial || !ownsClipboard())
+        return;
+    if (df::macclipboard::rendering()) {
+        m_republishPending = true;
+        QTimer::singleShot(20, this, [this, serial] { republishSealed(serial); });
+        return;
+    }
+    const qint64 change = df::macclipboard::republish();
+    if (change < 0)
+        return;
+    m_ownChangeCount = change; // not reported back (the poll skips it)
+    m_lastChangeCount = change;
+    qCInfo(lcClipBridge) << "Sealed clipboard written again for the next paste";
+}
+#endif
 
 bool ClipboardBridge::ownsClipboard() const
 {
@@ -568,6 +607,7 @@ void ClipboardBridge::apply(const QCborMap &formats, const QStringList &files)
 #ifdef Q_OS_MACOS
     m_ownChangeCount = df::macclipboard::changeCount(); // not reported back (the poll skips it)
     m_lastChangeCount = m_ownChangeCount;
+    ++m_sealedSerial; // a pending republish of the sealed items is void
 #endif
 #ifdef Q_OS_WIN
     // Rendered into the system clipboard right away: the content stays pasteable if this process

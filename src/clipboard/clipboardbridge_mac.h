@@ -11,6 +11,13 @@
 //    item. Without names but with `pendingFiles` (no full list: a guest's copy, or a long one) a
 //    single item offers every path at once (the legacy NSFilenamesPboardType) and the first as its
 //    file URL. Returns the change count once written (its own change, not to be reported back);
+//    `unprovided` (may be empty) is told when an item was asked for a type and got nothing (a
+//    refused or failed paste, a read that was no paste), with how long to wait before republishing:
+//    the pasteboard does not ask an item for the same type again (macOS 15), so without a fresh
+//    copy of the items the next paste would get nothing too;
+//  - republish: writes the last sealed items again, fresh (same content and state: nothing is
+//    decrypted or transferred again); returns the new change count, or -1 if there is nothing to
+//    republish;
 //  - rendering: whether an item is being rendered now (it may wait for the service in a nested
 //    event loop): the pasteboard is not replaced meanwhile.
 
@@ -18,11 +25,15 @@
 
 #include <QStringList>
 
+#include <functional>
+
 namespace df::macclipboard {
 
 qint64 changeCount();
 bool rendering();
 qint64 setSealed(const QList<ClipboardBridge::SealedFormat> &formats, const QStringList &names, int pendingFiles,
-                 ClipboardBridge::UnsealFormat unseal, ClipboardBridge::FetchFiles fetch);
+                 ClipboardBridge::UnsealFormat unseal, ClipboardBridge::FetchFiles fetch,
+                 std::function<void(int delayMs)> unprovided = {});
+qint64 republish();
 
 } // namespace df::macclipboard
