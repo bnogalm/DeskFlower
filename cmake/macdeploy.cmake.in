@@ -23,6 +23,9 @@ endfunction()
 message(STATUS "Deploying Qt into ${_app}")
 df_run("@DESKFLOWER_MACDEPLOYQT@" "${_app}" "-qmldir=@PROJECT_SOURCE_DIR@/src/agent/qml"
        "-executable=${_service}" "-executable=${_helper}" -always-overwrite)
+# DeskFlower uses no database: macdeployqt still copies Qt's SQL drivers (a QML module pulls in Qt
+# SQL), whose ODBC driver links Homebrew's libiodbc where that is installed.
+file(REMOVE_RECURSE "${_app}/Contents/PlugIns/sqldrivers")
 
 # The helper's own bundle: its libraries are those of DeskFlower.app (Contents/Helpers/
 # deskflower-session.app/Contents/MacOS is four levels below Contents), and so are the Qt plugins
