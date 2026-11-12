@@ -89,7 +89,6 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen   # tst_macclipboard sets cocoa for itself (the pasteboard)
-          DESKFLOWER_DESKTOP_TESTS: 1  # a throwaway runner: the tests on the real pasteboard run
           QT_LOGGING_RULES: deskflower.node.debug=true
           # disposable runner: the cases that touch the desktop or the profile run too (docs/TESTING.md)
           DESKFLOWER_DESKTOP_TESTS: "1"
