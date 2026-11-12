@@ -2,7 +2,7 @@
 rem Builds a release, installs a self-contained copy (executables + Qt + OpenSSL + MSVC runtime) into
 rem dist\Deskflower and wraps it into dist\Deskflower-<version>-Windows-x64.msi with WiX 3 (downloaded once
 rem into build\tools\wix, nothing is installed on the machine).
-rem Update signing (README, "Signed updates"): the key pair lives in %DESKFLOWER_SIGNING_DIR%, by default
+rem Update signing (docs/DESIGN.md, "Signed updates"): the key pair lives in %DESKFLOWER_SIGNING_DIR%, by default
 rem release-signing-key\ at the repository root (git-ignored, never packaged). It is created on the
 rem first run; the build embeds its public key and the MSI gets a signed manifest (<msi>.manifest +
 rem .manifest.sig) for paired-device updates. BACK UP THAT FOLDER: without it no later release can

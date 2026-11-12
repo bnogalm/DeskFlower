@@ -1,5 +1,5 @@
 // Built with ARC (src/clipboard/CMakeLists.txt).
-// NOTE: written without a macOS build environment; see the README.
+// NOTE: written without a macOS build environment; see docs/DESIGN.md.
 
 #include "clipboardbridge_mac.h"
 

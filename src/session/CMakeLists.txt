@@ -17,7 +17,7 @@ if(WIN32)
     target_sources(deskflower-session PRIVATE inputbackend_win.cpp screengrabber_win.cpp)
     target_link_libraries(deskflower-session PRIVATE user32 advapi32 d3d11 dxgi)
 elseif(APPLE)
-    # NOTE: not built yet on macOS (see README).
+    # NOTE: not built yet on macOS (see docs/DESIGN.md).
     target_sources(deskflower-session PRIVATE inputbackend_mac.cpp screengrabber_mac.mm)
     set_source_files_properties(screengrabber_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     # ScreenCaptureKit is weakly linked: macOS before 12.3 falls back to QScreen::grabWindow.

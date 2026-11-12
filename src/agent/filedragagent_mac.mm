@@ -13,7 +13,7 @@
 //    moved by the target itself.
 // Posting events needs the Accessibility permission for DeskFlower (the agent) too; without it the
 // user is told (notice) and nothing is caught or shown.
-// NOTE: written without a macOS build environment; see the README.
+// NOTE: written without a macOS build environment; see docs/DESIGN.md.
 
 #include "filedragagent.h"
 

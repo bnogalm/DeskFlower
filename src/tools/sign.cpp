@@ -1,4 +1,4 @@
-// deskflower-sign: release signing for updates served by paired devices (README, "Signed updates").
+// deskflower-sign: release signing for updates served by paired devices (docs/DESIGN.md, "Signed updates").
 //
 //   deskflower-sign keygen [dir]                       new key pair (default dir: ~/.deskflower-signing)
 //   deskflower-sign manifest <package> <version> [platform]   writes <package>.manifest

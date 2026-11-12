@@ -32,7 +32,7 @@ struct PendingFeature {
     const char *name;
     const char *reason;
 };
-// Intended behaviour (README) that this tree does not have yet. None now: trusted-paste-ungated
+// Intended behaviour (docs/DESIGN.md) that this tree does not have yet. None now: trusted-paste-ungated
 // (Device and Group paste without paste evidence) came with the clipboard work.
 const std::vector<PendingFeature> kPendingFeatures;
 

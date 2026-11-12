@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds the Linux test image (once) and runs the build and the test suite of this source tree in
-# it (README, "Linux tests in Docker"). The source is mounted read-only; the build lives in the
+# it (docs/DESIGN.md, "Linux tests in Docker"). The source is mounted read-only; the build lives in the
 # Docker volume "deskflower-linux-build" (delete it to start clean). Arguments go to ctest, for
 # example: tests/docker/run.sh -R 'tst_x11|tst_portal'. BUILD_ONLY=1 skips the tests.
 set -euo pipefail

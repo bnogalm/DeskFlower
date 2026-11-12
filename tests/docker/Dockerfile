@@ -1,4 +1,4 @@
-# Linux build and test environment (README, "Linux tests in Docker"): Ubuntu 24.04 with the same
+# Linux build and test environment (docs/DESIGN.md, "Linux tests in Docker"): Ubuntu 24.04 with the same
 # packages as the CI (.github/workflows/build.yml), Qt 6.11.2 from the official repository (via
 # aqtinstall), and what the X11/Wayland integration tests need: Xvfb, xdotool, xclip, a D-Bus
 # session bus, and the PipeWire/portal development files.

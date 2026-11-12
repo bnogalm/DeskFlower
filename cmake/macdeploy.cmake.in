@@ -77,7 +77,7 @@ foreach(_binary IN LISTS _binaries)
 endforeach()
 
 # Signed ad hoc, inside out (install_name_tool invalidated the signatures; Apple silicon runs no
-# unsigned code). Not notarized: Gatekeeper asks once (README).
+# unsigned code). Not notarized: Gatekeeper asks once (docs/DESIGN.md).
 df_run(codesign --force --sign - "${_service}")
 df_run(codesign --force --deep --sign - "${_helperApp}")
 df_run(codesign --force --deep --sign - "${_app}")

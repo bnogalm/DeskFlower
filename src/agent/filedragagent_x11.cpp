@@ -15,7 +15,7 @@
 //    master and the service says nothing, or the connection to the service lost.
 // Wayland gives a background program neither: there FileDragAgent::supportsNativeDrag() is false,
 // the master sends files dragged over this device with drag.drop and they go into the Downloads
-// folder (see the README).
+// folder (see docs/DESIGN.md).
 
 #include "filedragagent.h"
 

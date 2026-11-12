@@ -13,7 +13,7 @@
 //    gets no keys, they stay on this Mac) and the Screen Recording permission (remote view).
 // Coordinates are global display points (origin at the top-left of the main display), the same
 // space QScreen::geometry() uses.
-// NOTE: written without a macOS build environment; see the README.
+// NOTE: written without a macOS build environment; see docs/DESIGN.md.
 
 #include "inputbackend.h"
 #include "keymap.h"

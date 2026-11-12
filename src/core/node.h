@@ -214,7 +214,7 @@ public:
 
     // Encrypted stream to a trusted peer for bulk data. The caller owns the returned stream, which
     // emits `established` once one path reached the peer, or `closed` when none did; nullptr if
-    // the peer is unknown or there is no way to try. The paths, raced (see README, NAT):
+    // the peer is unknown or there is no way to try. The paths, raced (see docs/DESIGN.md, NAT):
     //   - TCP to every endpoint known for it (its port from the hello), one more every 250 ms;
     //   - over the session, the peer is asked to dial back (a TCP connection from it to this
     //     device, carrying a one-time nonce), which gets through a NAT the other way round;

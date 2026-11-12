@@ -5,7 +5,7 @@
 //  - captureScreenImage (thumbnails): one SCScreenshotManager image (macOS 14+).
 // Both need the Screen Recording permission (the system asks the first time; InputBackend reports
 // it missing). The cursor is left out: the viewer draws the remote one itself.
-// NOTE: written without a macOS build environment; see the README.
+// NOTE: written without a macOS build environment; see docs/DESIGN.md.
 
 #include "screengrabber.h"
 

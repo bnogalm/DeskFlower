@@ -1,6 +1,6 @@
 # CPack packages for Linux (DEB) and macOS (DMG). Windows uses the WiX MSI built by
 # scripts/package-windows.bat (installer/windows/deskflower.wxs).
-# NOTE: the DEB and DMG configurations have not been built yet (see README).
+# NOTE: the DEB and DMG configurations have not been built yet (see docs/DESIGN.md).
 
 set(CPACK_PACKAGE_NAME "deskflower")
 set(CPACK_PACKAGE_VENDOR "DeskFlower")

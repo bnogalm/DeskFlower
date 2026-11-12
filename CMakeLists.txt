@@ -23,7 +23,7 @@ include(GNUInstallDirs)
 file(WRITE ${CMAKE_BINARY_DIR}/version.txt "${PROJECT_VERSION}")
 
 # Ed25519 public key (64 hex characters) that update packages served by paired devices must be
-# signed with (README, "Signed updates"). Empty: updating from paired devices is disabled. When the
+# signed with (docs/DESIGN.md, "Signed updates"). Empty: updating from paired devices is disabled. When the
 # environment variable of the same name is set (scripts\package-windows.bat does it from the signing
 # key), it replaces the cached value.
 set(DESKFLOWER_UPDATE_PUBKEY "" CACHE STRING "Hex Ed25519 public key for signed updates (empty: disabled)")
@@ -42,7 +42,7 @@ else()
     message(STATUS "Signed updates from paired devices: key ${DESKFLOWER_UPDATE_PUBKEY_HEX}")
 endif()
 
-# Keyboard diagnostics (README, "Keyboard and mouse"): a troubleshooting tool that records the keys
+# Keyboard diagnostics (docs/DESIGN.md, "Keyboard and mouse"): a troubleshooting tool that records the keys
 # going between devices. Off by default: no UI, the agent's and peers' requests are ignored and its
 # code is not built. On: DESKFLOWER_KEY_DIAGNOSTICS is defined for every target.
 option(DESKFLOWER_KEY_DIAGNOSTICS "Build the keyboard diagnostics (troubleshooting, records keys)" OFF)

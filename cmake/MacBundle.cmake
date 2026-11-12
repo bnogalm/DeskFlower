@@ -9,7 +9,7 @@
 # Qt for all three, the helper is pointed at the shared Frameworks, libssl (loaded at run time by
 # Qt's OpenSSL backend, so macdeployqt does not see it) is added, and the whole bundle is signed
 # ad hoc (cmake/macdeploy.cmake.in).
-# NOTE: written without a macOS build environment; see the README.
+# NOTE: written without a macOS build environment; see docs/DESIGN.md.
 
 find_program(DESKFLOWER_MACDEPLOYQT macdeployqt HINTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}" REQUIRED)
 file(REAL_PATH "${OPENSSL_SSL_LIBRARY}" DESKFLOWER_LIBSSL)
