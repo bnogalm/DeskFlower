@@ -118,10 +118,13 @@ jobs:
             fi
           done < <(find "$app" -type f -print0)
           test "$bad" = 0
-          # What actually loads (dyld), with Homebrew's OpenSSL out of the way.
-          loaded=$(env -u DYLD_FALLBACK_LIBRARY_PATH DYLD_PRINT_LIBRARIES=1             "$app/Contents/MacOS/deskflower-service" --version 2>&1)
+          # What actually loads (dyld), as on a clean Mac: without Homebrew's OpenSSL and without the
+          # Qt paths the Qt installation step exports (QT_PLUGIN_PATH would load the platform plugin
+          # from the Qt used to build). The system perl, not Homebrew's (whose libraries dyld lists too).
+          clean="env -u DYLD_FALLBACK_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH -u QT_ROOT_DIR -u Qt6_DIR"
+          loaded=$($clean DYLD_PRINT_LIBRARIES=1 "$app/Contents/MacOS/deskflower-service" --version 2>&1)
           echo "$loaded" | grep -E '/opt/homebrew|/Qt/[0-9]' && { echo "::error::the service loads outside libraries"; exit 1; }
-          loaded=$(DYLD_PRINT_LIBRARIES=1 perl -e 'alarm 60; exec @ARGV'             "$app/Contents/Helpers/deskflower-session.app/Contents/MacOS/deskflower-session" --help 2>&1)
+          loaded=$($clean DYLD_PRINT_LIBRARIES=1 /usr/bin/perl -e 'alarm 60; exec @ARGV'             "$app/Contents/Helpers/deskflower-session.app/Contents/MacOS/deskflower-session" --help 2>&1             | grep -v '/usr/bin/perl\|libperl')
           echo "$loaded" | grep -E '/opt/homebrew|/Qt/[0-9]' && { echo "::error::the helper loads outside libraries"; exit 1; }
           echo "$loaded" | grep -q 'libqcocoa' || { echo "::error::the helper found no Qt platform plugin"; echo "$loaded"; exit 1; }
           test -f "$app/Contents/Frameworks/libssl.3.dylib"
